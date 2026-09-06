@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: datamind
+          POSTGRES_PASSWORD: datamind
+          POSTGRES_DB: datamind
+        ports: ["5433:5432"]
+        options: >-
+          --health-cmd "pg_isready -U datamind"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6380:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql+asyncpg://datamind:datamind@localhost:5433/datamind
+      REDIS_URL: redis://localhost:6380/0
+      ENVIRONMENT: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Instalar dependencias
+        run: python -m pip install -e ".[dev]"
+
+      - name: Lint
+        run: ruff check app tests scripts
+
+      - name: Formatacao
+        run: ruff format --check app tests scripts
+
+      - name: Tipos
+        run: mypy app
+
+      - name: Migrations
+        run: alembic upgrade head
+
+      - name: Testes
+        run: pytest --cov=app --cov-report=term-missing

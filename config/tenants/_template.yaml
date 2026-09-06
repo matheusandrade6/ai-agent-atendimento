@@ -1,0 +1,91 @@
+# Gabarito de config de tenant. Copie para `<slug>.yaml` e preencha.
+# Valide com: python -m app.domain.tenant_config_cli --validate config/tenants/<slug>.yaml
+#
+# Regras:
+# - Segredo nunca aparece aqui. Use ${VAR} e defina a variavel no ambiente.
+# - Campo desconhecido e erro de validacao, nao e ignorado.
+# - Se a personalizacao do cliente nao couber neste arquivo, ela vira campo novo do
+#   schema (para todos os tenants) ou nao e feita.
+
+identity:
+  name: "" # razao social ou nome fantasia usado nas mensagens
+  vertical: "" # veterinaria | medica | odontologica | estetica | terapias | ...
+  about: >
+    Duas ou tres frases sobre o negocio: o que faz, onde fica, o que NAO atende.
+    Este texto vai para o system prompt.
+
+persona:
+  agent_name: ""
+  introduce_as_ai: true # nao desligue sem parecer juridico (secao 18.4)
+  tone: "cordial, direto"
+  address_form: voce # voce | senhor_senhora
+  emojis: sparingly # never | sparingly | often
+  max_message_chars: 600
+  signature: null
+  vocabulary:
+    prefer: []
+    avoid: []
+
+channels:
+  whatsapp:
+    enabled: true
+    phone_number_id: "${WA_PHONE_NUMBER_ID}"
+    waba_id: "${WA_WABA_ID}"
+    debounce_seconds: 6
+    templates: {} # nome -> {name, language, variables}; sem isso nao ha envio proativo
+  web:
+    enabled: false
+    allowed_origins: []
+    greeting: ""
+
+scheduling:
+  calendar_provider: google
+  min_lead_time_minutes: 120
+  max_horizon_days: 45
+  slots_per_offer: 3
+  slot_granularity_minutes: 15
+  hold_ttl_minutes: 10
+  allow_reschedule: true
+  reschedule_min_notice_hours: 4
+  allow_cancel: true
+  cancel_min_notice_hours: 4
+  reminders: []
+  waitlist_enabled: false
+
+intake:
+  required: []
+  conditional: []
+  ask_style: one_at_a_time
+  max_questions_before_offer: 5
+
+escalation:
+  business_hours_only: false
+  notify: []
+  triggers:
+    - id: pedido_humano
+      match_intent: ask_for_human
+      action: escalate
+  handoff_silence_minutes: 120
+
+messages:
+  greeting_new: ""
+  greeting_returning: ""
+  out_of_scope: ""
+  confirmation: ""
+
+limits:
+  max_llm_cost_usd_per_conversation: 0.15
+  max_messages_per_conversation: 60
+  monthly_budget_alert_usd: 60
+
+business_hours:
+  timezone: America/Sao_Paulo
+  weekly:
+    mon: []
+    tue: []
+    wed: []
+    thu: []
+    fri: []
+    sat: []
+    sun: []
+  exceptions: []

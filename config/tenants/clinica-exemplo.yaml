@@ -1,0 +1,169 @@
+# Tenant de exemplo — clinica veterinaria (secao 10.3 da spec).
+# Serve de fixture para testes e de referencia no onboarding.
+
+identity:
+  name: "Clinica Veterinaria Bicho Feliz"
+  vertical: veterinaria
+  about: >
+    Clinica veterinaria de bairro em Pinheiros, Sao Paulo. Atende caes e gatos.
+    Consultas, vacinas, castracao e exames laboratoriais. Nao atende silvestres.
+
+persona:
+  agent_name: "Bia"
+  introduce_as_ai: true
+  tone: "cordial, direto, informal-profissional"
+  address_form: voce
+  emojis: sparingly
+  max_message_chars: 600
+  signature: null
+  vocabulary:
+    prefer: ["tutor", "pet", "atendimento"]
+    avoid: ["dono", "bichinho", "cliente"]
+
+channels:
+  whatsapp:
+    phone_number_id: "${WA_PHONE_NUMBER_ID}"
+    waba_id: "${WA_WABA_ID}"
+    debounce_seconds: 6
+    templates:
+      lembrete_24h:
+        name: lembrete_24h
+        language: pt_BR
+        variables: [nome, estabelecimento, data, hora]
+      confirmacao_agendamento:
+        name: confirmacao_agendamento
+        language: pt_BR
+        variables: [servico, data, hora, profissional, endereco]
+      cancelamento_prestador:
+        name: cancelamento_prestador
+        language: pt_BR
+        variables: [data, hora]
+      retomada_conversa:
+        name: retomada_conversa
+        language: pt_BR
+        variables: [nome]
+  web:
+    enabled: true
+    allowed_origins: ["https://bichofeliz.com.br"]
+    greeting: "Oi! Sou a Bia. Posso tirar duvidas ou marcar um horario."
+
+scheduling:
+  calendar_provider: google
+  min_lead_time_minutes: 120
+  max_horizon_days: 45
+  slots_per_offer: 3
+  slot_granularity_minutes: 15
+  hold_ttl_minutes: 10
+  allow_reschedule: true
+  reschedule_min_notice_hours: 4
+  allow_cancel: true
+  cancel_min_notice_hours: 4
+  reminders:
+    - kind: reminder_24h
+      offset_hours: -24
+      ask_confirmation: true
+      template: lembrete_24h
+    - kind: reminder_2h
+      offset_hours: -2
+      ask_confirmation: false
+  waitlist_enabled: true
+
+intake:
+  required:
+    - key: subject_name
+      label: "nome do pet"
+      type: string
+    - key: species
+      label: "especie"
+      type: enum
+      options: [cachorro, gato]
+      on_other: escalate
+    - key: is_first_visit
+      label: "primeira vez na clinica"
+      type: boolean
+    - key: service
+      label: "servico"
+      type: service_ref
+    - key: contact_name
+      label: "seu nome"
+      type: string
+  conditional:
+    - when: "service.name contains 'vacina'"
+      require:
+        - key: vaccine_card
+          label: "carteira de vacinacao em dia"
+          type: boolean
+    - when: "is_first_visit == false"
+      require:
+        - key: last_visit_hint
+          label: "quando foi a ultima visita"
+          type: string
+          optional: true
+  ask_style: one_at_a_time
+  max_questions_before_offer: 5
+
+escalation:
+  business_hours_only: false
+  notify:
+    - channel: whatsapp
+      to: "+5511999999999"
+  triggers:
+    - id: emergencia
+      match_keywords: ["atropelado", "convulsao", "nao respira", "sangramento",
+                       "envenenado", "engasgado", "urgente", "emergencia"]
+      action: escalate_immediately
+      reply: >
+        Isso pode ser uma emergencia. Vou chamar alguem da equipe agora.
+        Se estiver muito grave, va direto a clinica: {address}. Telefone: {phone}.
+    - id: pedido_humano
+      match_intent: ask_for_human
+      action: escalate
+    - id: orientacao_clinica
+      match_intent: medical_advice
+      action: refuse_and_offer_appointment
+      reply: >
+        Nao consigo avaliar isso por aqui — quem faz isso e o veterinario
+        na consulta. Quer que eu veja um horario?
+    - id: baixa_confianca
+      condition: "unanswered_questions >= 2"
+      action: escalate
+  handoff_silence_minutes: 120
+
+messages:
+  greeting_new: >
+    Oi! Aqui e a Bia, assistente virtual da Bicho Feliz
+    Posso te ajudar com duvidas ou marcar um horario. O que voce precisa?
+  greeting_returning: >
+    Oi, {contact_name}! Que bom te ver de novo. Como posso ajudar?
+  out_of_scope: >
+    Essa eu nao sei responder com seguranca. Vou passar para alguem da equipe.
+  confirmation: >
+    Prontinho!
+    *{service}* para *{subject_name}*
+    {date_human} as {time}
+    {provider}
+    {address}
+    {price_line}
+    {prep_line}
+    Se precisar mudar, e so me chamar.
+
+limits:
+  max_llm_cost_usd_per_conversation: 0.15
+  max_messages_per_conversation: 60
+  monthly_budget_alert_usd: 60
+
+business_hours:
+  timezone: America/Sao_Paulo
+  weekly:
+    mon: [{ start: "08:00", end: "12:00" }, { start: "13:30", end: "19:00" }]
+    tue: [{ start: "08:00", end: "12:00" }, { start: "13:30", end: "19:00" }]
+    wed: [{ start: "08:00", end: "12:00" }, { start: "13:30", end: "19:00" }]
+    thu: [{ start: "08:00", end: "12:00" }, { start: "13:30", end: "19:00" }]
+    fri: [{ start: "08:00", end: "12:00" }, { start: "13:30", end: "18:00" }]
+    sat: [{ start: "09:00", end: "13:00" }]
+    sun: []
+  exceptions:
+    - date: "2026-12-25"
+      closed: true
+    - date: "2026-12-24"
+      windows: [{ start: "09:00", end: "12:00" }]
