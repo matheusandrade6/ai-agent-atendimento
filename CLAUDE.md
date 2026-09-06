@@ -44,10 +44,18 @@ Nunca escreva `if tenant == 'x'`.
 
 ## Comandos
 
-```bash
-make up        # docker compose up -d (postgres + redis)
-make migrate   # alembic upgrade head
-make test      # pytest
-make lint      # ruff check + mypy --strict
-make dev       # uvicorn com reload
+No Windows (PowerShell) — `make` normalmente nao existe; use o script:
+
+```powershell
+.\tasks.ps1 up        # docker compose up -d postgres redis
+.\tasks.ps1 install   # cria o venv e instala dependencias
+.\tasks.ps1 migrate
+.\tasks.ps1 test
+.\tasks.ps1 lint      # ruff check + ruff format --check + mypy
+.\tasks.ps1 check     # migrate + test + lint, para fechar uma sessao
 ```
+
+No Linux/macOS: `make up`, `make migrate`, `make test`, `make lint`, `make dev`.
+
+O PowerShell 5.1 **nao aceita `&&`** para encadear comandos. Use `;` ou o
+`tasks.ps1 check`, que ja roda tudo na ordem.

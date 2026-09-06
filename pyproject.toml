@@ -22,6 +22,7 @@ dependencies = [
     "opentelemetry-api>=1.29",
     "opentelemetry-sdk>=1.29",
     "opentelemetry-instrumentation-fastapi>=0.50b0",
+    "opentelemetry-exporter-otlp-proto-http>=1.29",
     "structlog>=24.4",
     # Base IANA em processo. Sem ela, `zoneinfo` depende do sistema — que nao existe no
     # Windows e nao vem nas imagens slim. RNF-06 morre em silencio se faltar.

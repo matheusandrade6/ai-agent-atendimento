@@ -28,7 +28,8 @@ jobs:
           --health-interval 5s --health-timeout 3s --health-retries 10
 
     env:
-      DATABASE_URL: postgresql+asyncpg://datamind:datamind@localhost:5433/datamind
+      DATABASE_URL: postgresql+asyncpg://datamind_app:datamind_app@localhost:5433/datamind
+      DATABASE_ADMIN_URL: postgresql+asyncpg://datamind:datamind@localhost:5433/datamind
       REDIS_URL: redis://localhost:6380/0
       ENVIRONMENT: test
 
@@ -51,6 +52,13 @@ jobs:
 
       - name: Tipos
         run: mypy app
+
+      # O servico do Actions nao executa /docker-entrypoint-initdb.d, entao o papel
+      # de aplicacao e criado aqui, a partir do mesmo arquivo usado no compose.
+      - name: Criar papel de aplicacao
+        run: psql "$DATABASE_ADMIN_URL_PSQL" -f docker/postgres/init/01-app-role.sql
+        env:
+          DATABASE_ADMIN_URL_PSQL: postgresql://datamind:datamind@localhost:5433/datamind
 
       - name: Migrations
         run: alembic upgrade head

@@ -67,6 +67,27 @@ def two_tenants(sync_engine: sa.Engine) -> Iterator[tuple[uuid.UUID, uuid.UUID]]
 # ------------------------------ isolamento ------------------------------
 
 
+def test_aplicacao_nao_conecta_como_superusuario(sync_engine: sa.Engine) -> None:
+    """A premissa de que toda a RLS depende.
+
+    Superusuario ignora policy por completo — inclusive com FORCE, que so alcanca o
+    dono da tabela. Se a aplicacao conectar com um papel privilegiado, todos os outros
+    testes deste arquivo passam a testar nada. Por isso este vem primeiro.
+    """
+    with sync_engine.connect() as conn:
+        role = conn.execute(
+            sa.text(
+                "SELECT rolname, rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user"
+            )
+        ).one()
+
+    assert not role.rolsuper, (
+        f"a aplicacao conecta como '{role.rolname}', que e SUPERUSER: a RLS nao vale nada. "
+        "Use o papel datamind_app (ver docs/DECISOES.md, D-09)."
+    )
+    assert not role.rolbypassrls, f"'{role.rolname}' tem BYPASSRLS"
+
+
 def test_tenant_a_nao_ve_linha_de_b(
     sync_engine: sa.Engine, two_tenants: tuple[uuid.UUID, uuid.UUID]
 ) -> None:

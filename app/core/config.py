@@ -28,7 +28,16 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
 
     # --- infraestrutura ---
+    # A aplicacao conecta com um papel SEM privilegio. Superusuario ignora RLS por
+    # completo — inclusive com FORCE — e o isolamento entre tenants viraria decoracao
+    # (RNF-03; ver docs/DECISOES.md, D-09).
     database_url: PostgresDsn = Field(
+        default=PostgresDsn(
+            "postgresql+asyncpg://datamind_app:datamind_app@localhost:5433/datamind"
+        )
+    )
+    # Dono das tabelas. Usado apenas pelas migrations, nunca para servir request.
+    database_admin_url: PostgresDsn = Field(
         default=PostgresDsn("postgresql+asyncpg://datamind:datamind@localhost:5433/datamind")
     )
     redis_url: RedisDsn = Field(default=RedisDsn("redis://localhost:6380/0"))
@@ -79,8 +88,13 @@ class Settings(BaseSettings):
 
     @property
     def sync_database_url(self) -> str:
-        """URL psycopg/sincrona — usada pelo Alembic e por testes de integracao."""
+        """URL sincrona do papel de aplicacao — usada nos testes de integracao."""
         return str(self.database_url).replace("+asyncpg", "")
+
+    @property
+    def sync_admin_database_url(self) -> str:
+        """URL sincrona do dono das tabelas — usada pelo Alembic."""
+        return str(self.database_admin_url).replace("+asyncpg", "")
 
 
 @lru_cache(maxsize=1)

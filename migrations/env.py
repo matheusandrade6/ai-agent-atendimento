@@ -13,8 +13,9 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# O Alembic roda sincrono; a URL asyncpg da app e convertida em psycopg.
-config.set_main_option("sqlalchemy.url", get_settings().sync_database_url)
+# As migrations rodam como DONO das tabelas, nao com o papel de aplicacao:
+# criar extensao, tabela e policy exige privilegio que o papel restrito nao tem.
+config.set_main_option("sqlalchemy.url", get_settings().sync_admin_database_url)
 
 target_metadata = Base.metadata
 

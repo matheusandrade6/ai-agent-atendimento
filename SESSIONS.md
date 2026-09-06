@@ -33,7 +33,7 @@ tenants, alucinação de horário/preço ou perda de mensagem**, use Opus.
 | # | Sessão | Fase | Modelo | Depende de | Status |
 |---|---|---|---|---|---|
 | S01 | Scaffolding, Docker, settings, CI | 0 | Sonnet | — | ✅ feito |
-| S02 | Modelo de dados, migrations e RLS | 0 | **Opus** | S01 | ⚠️ codigo pronto, integracao nao rodada |
+| S02 | Modelo de dados, migrations e RLS | 0 | **Opus** | S01 | ✅ feito |
 | S03 | Config de tenant (schema Pydantic + loader YAML) | 0 | Sonnet | S01 | ✅ feito |
 | S04 | Webhook WhatsApp: assinatura, dedup, roteamento | 1 | Sonnet | S02, S03 | ⬜ |
 | S05 | Filas ARQ, debounce Redis, workers in/out | 1 | **Opus** | S04 | ⬜ |
@@ -388,21 +388,22 @@ internal.py passa na mesma bateria de testes de contrato do provider.
 
 ---
 
-## Pendência aberta na Fase 0
+## Estado da Fase 0
 
-Docker Desktop não sobe nesta máquina (o serviço `com.docker.service` está parado e
-iniciá-lo exige elevação), então **nada que dependa de Postgres foi executado**:
-as migrations não foram aplicadas e `tests/integration/test_rls.py` não rodou.
-O código está escrito e os 31 testes unitários passam.
+Fechada e verificada contra Postgres real: 42 testes verdes (32 unitários + 10 de
+integração), `ruff` e `mypy --strict` limpos, migrations `0001`–`0004` aplicadas.
 
-Antes de abrir a S04, feche isto:
+O teste de isolamento pegou uma falha real durante a verificação: a aplicação conectava
+como superusuário, e superusuário ignora RLS mesmo com `FORCE`. Corrigido com um papel
+sem privilégio (`docs/DECISOES.md`, D-09). **A S04 já pode começar.**
 
-```bash
-make up && make migrate && make test && make lint
+Para conferir o ambiente antes de abrir uma sessão nova (PowerShell — `make` não existe
+no Windows):
+
+```powershell
+.	asks.ps1 up
+.	asks.ps1 check
 ```
-
-Se o teste de isolamento ou o de overbooking falhar, é a S02 que volta — não a S04.
-Detalhes em `docs/DECISOES.md`, seção "Pendências de verificação".
 
 ---
 

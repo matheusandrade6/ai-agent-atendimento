@@ -36,15 +36,19 @@ Como comparação com NULL é falsa, **o padrão passa a ser não ver nada**.
 descobrir o tenant *antes* de tê-lo) e jobs de cron que varrem a base inteira ficariam sem
 acesso.
 
-**Alternativa descartada.** Um segundo papel de banco com `BYPASSRLS`. Correto, porém obriga
-a gerenciar dois usuários, dois segredos e dois pools desde o dia 1.
+**Alternativa descartada.** Um segundo papel de banco com `BYPASSRLS`. Dá isolamento no
+nível do papel, mas exige um terceiro conjunto de credenciais e um pool próprio só para
+tarefas administrativas.
 
 **Decisão.** Uma segunda condição na policy: `current_setting('app.bypass_rls') = 'on'`,
 acessível apenas pelo context manager `bypass_rls_session()`. O nome é deliberadamente
 constrangedor para saltar aos olhos em code review.
 
-**Revisitar quando.** Ao separar o usuário de aplicação do dono das tabelas — aí o papel
-dedicado com `BYPASSRLS` passa a ser a opção melhor.
+**Nota (atualizada por D-09).** A separação entre papel de aplicação e dono das tabelas
+já existe — mas por outro motivo, e ela **não substitui esta válvula**: `datamind_app` é
+`NOBYPASSRLS` de propósito, então continua precisando da GUC para o roteamento de webhook
+e para os jobs que varrem tenants. Um terceiro papel com `BYPASSRLS` só se justifica se
+esses caminhos crescerem além de um punhado.
 
 ---
 
@@ -112,12 +116,65 @@ Campos que a spec exige em texto mas não lista na DDL da seção 9:
 
 ---
 
+## D-09 · A aplicação conecta com um papel sem privilégio · S02
+
+**Como apareceu.** Com as migrations aplicadas, `test_tenant_a_nao_ve_linha_de_b` falhou:
+o tenant A enxergou as duas linhas. A RLS estava ligada, forçada e com a policy correta.
+
+**Causa.** O usuário que a imagem do Postgres cria a partir de `POSTGRES_USER` é
+**SUPERUSER**, e superusuário **ignora RLS por completo**. `FORCE ROW LEVEL SECURITY`
+resolve o caso do *dono* da tabela (D-01), mas não alcança superusuário — são duas
+formas diferentes de contornar a policy, e eu só tinha coberto uma.
+
+**Decisão.** Dois papéis:
+
+| Papel | Privilégio | Uso |
+|---|---|---|
+| `datamind` | SUPERUSER, dono das tabelas | Só migrations. Nunca serve request. |
+| `datamind_app` | NOSUPERUSER, NOBYPASSRLS | Aplicação, workers e testes. |
+
+`Settings.database_url` aponta para `datamind_app`; `database_admin_url`, usado apenas
+pelo Alembic, aponta para o dono. O papel nasce em
+`docker/postgres/init/01-app-role.sql` e recebe os GRANTs na migration `0004`.
+
+**Guarda permanente.** `test_aplicacao_nao_conecta_como_superusuario` lê
+`pg_roles.rolsuper` e `rolbypassrls` do `current_user` e falha se a aplicação voltar a
+conectar privilegiada. Ele roda **antes** dos demais testes de isolamento, porque sem ele
+todos os outros passariam a testar nada. Verifiquei que ele falha de fato: apontando
+`DATABASE_URL` de volta para `datamind`, quatro testes de isolamento caem junto com ele.
+
+**Lição que vale para as próximas sessões.** RLS tem três formas de ser contornada —
+superusuário, `BYPASSRLS` e dono sem `FORCE`. Fechar duas não protege.
+
+---
+
+## D-10 · `opentelemetry-exporter-otlp-proto-http` faltava nas dependências · S01
+
+`setup_tracing` importa o exporter OTLP, mas só `opentelemetry-api`, `-sdk` e
+`-instrumentation-fastapi` estavam declarados. Com `OTEL_ENABLED=true` a aplicação
+quebraria no startup. Detectado pelo `mypy --strict` (`import-not-found`).
+
+---
+
+## D-11 · `tasks.ps1` para Windows · S01
+
+`make` não existe numa instalação padrão do Windows e o PowerShell 5.1 não aceita `&&`
+para encadear comandos — o Makefile é inútil nesta máquina. `tasks.ps1` expõe as mesmas
+tarefas (`up`, `install`, `migrate`, `test`, `lint`, `check`) e verifica o engine do
+Docker antes de tentar subir os containers, com a instrução de recuperação no erro.
+
+---
+
 ## Pendências de verificação
 
-| Item | Estado | Como fechar |
-|---|---|---|
-| Migrations `0001`–`0003` aplicadas | **não executado** | Docker Desktop não sobe nesta máquina (serviço `com.docker.service` parado, exige elevação). Rodar `make up && make migrate`. |
-| `tests/integration/test_rls.py` | **não executado** | Depende do item acima. Sem Postgres, os testes são pulados, não falham. |
-| `mypy --strict` | **não executado** | Instalação do `mypy` interrompida por falha de rede no PyPI. Rodar `make lint`. |
-| Testes unitários (31) | ✅ verde | — |
-| `ruff check` + `ruff format` | ✅ limpo | — |
+Todas fechadas. Estado verificado ao fim da Fase 0, contra Postgres 16 real:
+
+| Item | Estado |
+|---|---|
+| Migrations `0001`–`0004` | ✅ aplicadas |
+| Isolamento entre tenants (6 testes) | ✅ verde |
+| Rede anti-overbooking (4 testes) | ✅ verde |
+| Testes unitários (32) | ✅ verde |
+| Total: 42 testes | ✅ verde |
+| `ruff check` + `ruff format --check` | ✅ limpo |
+| `mypy --strict` | ✅ limpo (22 arquivos) |

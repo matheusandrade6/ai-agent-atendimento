@@ -9,10 +9,20 @@ servico com hora marcada. WhatsApp Cloud API + Google Calendar.
 
 ## Subir o ambiente
 
-```bash
-cp .env.example .env
-make up
-make install
-make migrate
-make test
+Windows (PowerShell):
+
+```powershell
+Copy-Item .env.example .env
+.\tasks.ps1 install
+.\tasks.ps1 up
+.\tasks.ps1 check
 ```
+
+Linux/macOS:
+
+```bash
+cp .env.example .env && make install && make up && make migrate && make test
+```
+
+O Postgres sobe em `localhost:5433` e o Redis em `localhost:6380` — portas deslocadas
+para nao brigar com instancias locais.

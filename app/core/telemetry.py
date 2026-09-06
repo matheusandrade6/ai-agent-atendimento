@@ -10,10 +10,10 @@ import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Any
 
 import structlog
 from fastapi import FastAPI
+from structlog.typing import EventDict, WrappedLogger
 
 from app.core.config import Settings
 
@@ -21,7 +21,7 @@ _tenant_id: ContextVar[str | None] = ContextVar("tenant_id", default=None)
 _conversation_id: ContextVar[str | None] = ContextVar("conversation_id", default=None)
 
 
-def _inject_context(_logger: object, _name: str, event_dict: dict[str, Any]) -> dict[str, Any]:
+def _inject_context(_logger: WrappedLogger, _name: str, event_dict: EventDict) -> EventDict:
     tenant = _tenant_id.get()
     conversation = _conversation_id.get()
     if tenant is not None:
