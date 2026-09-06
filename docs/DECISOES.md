@@ -165,6 +165,53 @@ Docker antes de tentar subir os containers, com a instrução de recuperação n
 
 ---
 
+## D-12 · Roteamento do webhook varre os tenants ativos, sem cache · S04
+
+**Contexto.** O webhook recebe `phone_number_id` e precisa achar o tenant dono do
+numero (14.1.1) antes de ter um `tenant_id` para abrir RLS. `tenants.config` guarda o
+YAML bruto, com `${VAR}` preservado (D-04) — não dá para comparar o valor resolvido
+direto numa cláusula `WHERE` em JSONB.
+
+**Decisão.** `resolve_tenant_by_phone_number_id` lê todos os tenants com
+`status = 'active'` via `bypass_rls_session()` (a válvula de escape de D-03, no uso
+que o próprio `app.core.db` já documenta: "roteamento de webhook, que precisa
+descobrir o tenant antes de ter um"), resolve a config de cada um com
+`TenantConfig.resolved()` e compara `channels.whatsapp.phone_number_id`. Sem cache.
+
+**Por que não cachear agora.** Volume de tenants em v1 é dezenas, não milhares — uma
+varredura completa por request cabe folgado no orçamento de <1s do webhook. Cache
+introduziria invalidação (config muda por deploy, não por commit) sem necessidade
+comprovada. Revisitar se o número de tenants ativos crescer o bastante para pesar.
+
+**Config de tenant inválida não derruba o roteamento.** Uma linha que falhe
+`TenantConfig.model_validate` é ignorada com log de aviso, não propaga exceção — um
+tenant mal configurado não pode impedir os outros de receber mensagem.
+
+---
+
+## D-13 · Contrato de handoff para a fila (S04 -> S05) · S04
+
+**Contexto.** SESSIONS.md pede que S04 já enfileire, mas o worker que consome a fila
+com debounce (14.1.2) é da S05. Sem o consumidor, o contrato do produtor precisa ser
+estável o bastante para não travar S05, mas simples o bastante para não antecipar
+decisão que não é desta sessão.
+
+**Decisão.** `app.workers.queue.InboundQueue` é um `Protocol` com
+`enqueue_inbound(tenant_id, conversation_id)`. `ArqInboundQueue` é a implementação
+real (arq), guardada em `app.state.inbound_queue` e trocável por um fake nos testes
+sem `Depends` — o webhook lê direto de `request.app.state`. O nome do job
+(`INBOUND_JOB_NAME = "process_inbound"`) e o payload são deliberadamente mínimos:
+S05 é livre para mudar os dois, desde que atualize os testes desta sessão (regra do
+SESSIONS.md) em vez de contornar.
+
+**Falha ao enfileirar nunca derruba o webhook.** A mensagem já está persistida antes
+do `enqueue_inbound`; se o Redis estiver fora, a conexão tenta uma única vez (sem o
+backoff de 5 tentativas do arq, que sozinho estouraria o orçamento de <1s) e loga
+erro. O turno fica atrasado, não perdido — reprocessamento de mensagens órfãs é
+trabalho futuro, fora do escopo desta sessão.
+
+---
+
 ## Pendências de verificação
 
 Todas fechadas. Estado verificado ao fim da Fase 0, contra Postgres 16 real:

@@ -12,8 +12,10 @@ from typing import Any
 
 from fastapi import FastAPI
 
+from app.api.webhooks.whatsapp import router as whatsapp_webhook_router
 from app.core.config import Settings, get_settings
 from app.core.telemetry import configure_logging, get_logger, setup_tracing
+from app.workers.queue import ArqInboundQueue
 
 log = get_logger(__name__)
 
@@ -23,6 +25,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings: Settings = app.state.settings
     log.info("startup", environment=settings.environment)
     yield
+    await app.state.inbound_queue.close()
     log.info("shutdown")
 
 
@@ -38,11 +41,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.settings = settings
+    app.state.inbound_queue = ArqInboundQueue(settings)
     setup_tracing(app, settings)
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
         return {"status": "ok", "environment": settings.environment}
+
+    app.include_router(whatsapp_webhook_router)
 
     return app
 
