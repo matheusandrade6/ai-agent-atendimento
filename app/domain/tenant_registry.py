@@ -12,7 +12,7 @@ import uuid
 import sqlalchemy as sa
 
 from app.core.config import Settings
-from app.core.db import bypass_rls_session
+from app.core.db import bypass_rls_session, tenant_session
 from app.core.telemetry import get_logger
 from app.domain.tenant_config import TenantConfig
 
@@ -48,3 +48,31 @@ async def resolve_tenant_by_phone_number_id(
             tenant_id: uuid.UUID = row.id
             return tenant_id
     return None
+
+
+async def load_config_by_tenant_id(
+    tenant_id: uuid.UUID, settings: Settings | None = None
+) -> TenantConfig | None:
+    """Config resolvida de um tenant ativo, pelo id.
+
+    Os workers ja sabem o tenant quando chegam aqui, entao a leitura acontece dentro da
+    `tenant_session` — `tenants` nao e uma tabela com `tenant_id` e fica fora da RLS,
+    mas abrir o contexto mesmo assim mantem o job com um unico tenant amarrado do
+    inicio ao fim (invariante 2).
+    """
+    async with tenant_session(tenant_id, settings) as session:
+        row = (
+            await session.execute(
+                sa.text("SELECT config FROM tenants WHERE id = :id AND status = 'active'"),
+                {"id": tenant_id},
+            )
+        ).first()
+
+    if row is None:
+        log.warning("tenant_inativo_ou_inexistente", tenant_id=str(tenant_id))
+        return None
+    try:
+        return TenantConfig.model_validate(row.config).resolved()
+    except Exception:
+        log.warning("tenant_config_invalida", tenant_id=str(tenant_id))
+        return None

@@ -58,6 +58,10 @@ class Settings(BaseSettings):
     whatsapp_app_secret: str = ""
     whatsapp_verify_token: str = ""
     whatsapp_api_version: str = "v21.0"
+    # Token de sistema da Business Manager. Um token cobre varios WABAs; o que separa
+    # um tenant do outro no envio e o `phone_number_id` da config (docs/DECISOES.md, D-16).
+    whatsapp_access_token: str = ""
+    whatsapp_api_base_url: str = "https://graph.facebook.com"
 
     # --- seguranca ---
     secret_key: str = "dev-only-change-me"
@@ -66,6 +70,24 @@ class Settings(BaseSettings):
     # --- limites globais (teto sobre o que o tenant configura) ---
     max_tool_iterations: int = 6
     default_debounce_seconds: int = 6
+
+    # --- filas e workers ---
+    # TTL do buffer de agregacao. Precisa ser confortavelmente maior que o maior
+    # `debounce_seconds` configuravel (60s): ele so existe para o buffer nao vazar
+    # quando um disparo se perde (secao 14.1.2).
+    aggregation_ttl_seconds: int = 900
+    # Anti-flood por contato, contado em turnos ja agregados (secao 11.5).
+    contact_rate_limit_max_turns: int = 12
+    contact_rate_limit_window_seconds: int = 60
+    # Backoff exponencial da fila de saida (secao 14.1.3).
+    outbound_max_tries: int = 5
+    outbound_backoff_base_seconds: float = 2.0
+    outbound_backoff_max_seconds: float = 300.0
+    # Janela de idempotencia do envio: uma resposta com a mesma chave nao sai duas vezes.
+    outbound_idempotency_ttl_seconds: int = 86400
+    worker_max_jobs: int = 10
+    worker_job_timeout_seconds: int = 120
+    worker_keep_result_seconds: int = 3600
 
     # --- observabilidade ---
     otel_enabled: bool = False

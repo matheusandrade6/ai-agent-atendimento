@@ -25,6 +25,7 @@ from app.core.config import Settings
 from app.core.db import dispose_engine
 from app.domain.tenant_config import load_tenant_config
 from app.main import create_app
+from app.workers.queue import InboundMessage
 
 pytestmark = pytest.mark.integration
 
@@ -40,13 +41,17 @@ def _sign(body: bytes, secret: str) -> str:
 
 
 class FakeQueue:
-    """Substitui `ArqInboundQueue` nos testes: sem Redis, so registra as chamadas."""
+    """Substitui `ArqInboundQueue` nos testes: sem Redis, so registra as chamadas.
+
+    O contrato mudou na S05: o job leva a mensagem inteira, nao so os ids, porque a
+    agregacao por debounce (14.1.2) monta a rajada em Redis.
+    """
 
     def __init__(self) -> None:
-        self.calls: list[tuple[uuid.UUID, uuid.UUID]] = []
+        self.calls: list[InboundMessage] = []
 
-    async def enqueue_inbound(self, *, tenant_id: uuid.UUID, conversation_id: uuid.UUID) -> None:
-        self.calls.append((tenant_id, conversation_id))
+    async def enqueue_inbound(self, message: InboundMessage) -> None:
+        self.calls.append(message)
 
     async def close(self) -> None:
         return None
@@ -269,6 +274,9 @@ def test_payload_duplicado_produz_uma_linha_e_enfileira_uma_vez(
 
     assert count == 1
     assert len(fake_queue.calls) == 1
+    enfileirada = fake_queue.calls[0]
+    assert enfileirada.provider_msg_id == msg_id
+    assert enfileirada.text == "Oi, quero marcar um horario"
 
 
 def test_mensagem_inbound_atualiza_janela_de_servico(

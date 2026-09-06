@@ -212,6 +212,131 @@ trabalho futuro, fora do escopo desta sessão.
 
 ---
 
+## D-14 · O job de entrada carrega a mensagem, não só os ids · S05
+
+**Contexto.** A S04 (D-13) entregou `enqueue_inbound(tenant_id, conversation_id)`. Para
+agregar a rajada, o worker precisa saber **quais mensagens ainda não viraram turno**.
+
+**Problema.** Com só os ids, o worker teria que reler `messages` do banco e descobrir o
+que está pendente — o que exige uma coluna de "já processada" (migration nova, escrita a
+mais no caminho quente) ou uma heurística por timestamp, que erra em reentrega.
+
+**Decisão.** O job leva a mensagem inteira (`InboundMessage`: ids, canal, tipo, texto,
+`media_ref`, `provider_msg_id`). Quem sabe o que ainda não virou turno é o buffer em
+Redis, não o banco. O payload trafega como `dict` JSON, não como objeto: produtor e
+consumidor são processos separados que convivem em versões diferentes durante um deploy.
+
+**Consequência.** Os testes da S04 foram atualizados (regra do SESSIONS.md), não
+contornados. O banco continua sendo a fonte de verdade do histórico; o Redis é a fonte
+de verdade do *que está em voo*, e perder o Redis atrasa turnos sem perder mensagem.
+
+---
+
+## D-15 · Debounce por sequência monotônica, não por timer cancelável · S05
+
+**Contexto.** A 14.1.2 pede que cada mensagem reinicie o timer de `debounce_seconds`.
+
+**Problema.** "Reiniciar o timer" sugere cancelar o disparo agendado. Cancelamento em
+fila distribuída é corrida pura: entre `cancel` e `schedule` cabe o disparo antigo
+(dois turnos para a mesma rajada) e entre `drain` e `append` cabe a mensagem nova
+(rajada perdida).
+
+**Decisão.** Nada é cancelado. Cada mensagem incrementa `agg:{id}:seq` e agenda um
+disparo que **declara qual sequência esperava ver**. O disparo só fecha a rajada se o
+contador ainda for aquele; senão, desiste em favor do disparo mais novo. Ler-e-apagar o
+buffer é um script Lua, então não existe janela entre conferir e consumir.
+
+**Prova das duas garantias.** Um turno por rajada: o *drain* é atômico, só um chamador
+leva as partes; um disparo repetido encontra a lista vazia. Nenhuma mensagem perdida: ou
+ela entra antes do disparo (e o contador avança, empurrando a rajada para o disparo dela)
+ou entra depois (e abre a próxima rajada). O teste
+`test_mensagem_que_chega_junto_do_disparo_nao_se_perde` roda os dois interleavings com
+`asyncio.gather`, em Redis real, e aceita os dois desfechos — o que ele proíbe é
+duplicata, sumiço ou turno vazio.
+
+**Idempotência.** `agg:{id}:seen` guarda os ids já bufferizados: um job reentregue pelo
+arq não duplica a parte, mas **reagenda** o disparo — sem isso, a última mensagem da
+rajada poderia ficar presa no buffer até a pessoa escrever de novo.
+
+---
+
+## D-16 · Token do WhatsApp é global; o que é por tenant é o `phone_number_id` · S05
+
+**Contexto.** O envio precisa de um token de acesso, e a spec só define secret store por
+tenant para o Google (`providers.credentials_ref`, 14.3).
+
+**Decisão.** `WHATSAPP_ACCESS_TOKEN` é uma setting global — um token de sistema da
+Business Manager cobre os WABAs sob ela. O que separa um tenant do outro no envio é o
+`phone_number_id`, que vem da config do tenant. Nenhum `if tenant == 'x'`: é o mesmo
+código com um número diferente na URL.
+
+**Consequência e limite.** Cliente com WABA em Business Manager própria não cabe nesse
+modelo. Quando aparecer, o token vira `channels.whatsapp.credentials_ref` no mesmo
+padrão do Google, sem tocar no worker. Sem token configurado, o canal simplesmente não
+existe e o worker segue rodando — que é o estado normal em desenvolvimento.
+
+---
+
+## D-17 · Fora da janela de 24h, texto livre é recusado, não adiado · S05
+
+**Contexto.** A 14.1.4 proíbe texto livre fora da janela de serviço; o envio proativo
+exige template utility aprovado, que é entrega da S19.
+
+**Decisão.** O worker de saída checa `service_window_expires_at` antes de chamar o canal.
+Fechada, a mensagem **não é enviada**, vira linha `blocked` em `messages` e sai log de
+erro. Não há retentativa: o tempo não reabre a janela.
+
+**Por que não guardar para mandar depois.** Uma resposta de agendamento que chega horas
+atrasada é pior que nenhuma. E persistir a tentativa como `blocked` é o que faz o
+atendente ver, na caixa de conversas (15.2), que houve silêncio e por quê — em vez de um
+buraco inexplicado.
+
+**Retentativa do que é transitório.** `429` reagenda honrando `Retry-After`; `5xx` e
+timeout reagendam com backoff exponencial de *equal jitter*; `4xx` marca `failed` e para.
+Esgotadas as tentativas, a mensagem também vira linha `failed`: fila de saída não
+descarta em silêncio.
+
+---
+
+## D-18 · Settings de worker por decorador, porque o arq lê o `__dict__` da classe · S05
+
+**Contexto.** Quatro perfis de worker (tudo-em-um, entrada, saída, cron) compartilham
+`redis_settings`, `on_startup`, limites.
+
+**Problema encontrado na verificação.** Herança **não funciona** aqui: o arq monta o
+worker a partir de `settings_cls.__dict__`, então uma subclasse que só troca `functions`
+perde `redis_settings` sem um único erro — e o worker sobe apontando para o Redis default
+`localhost:6379`. A falha só aparece em produção, como fila que não anda.
+
+**Decisão.** Um decorador (`_com_padroes`) grava os atributos comuns no `__dict__` de
+cada classe. `tests/unit/test_worker_settings.py` afirma, para os quatro perfis, que o
+worker resolve o Redis da aplicação, os limites e o ciclo de vida.
+
+**Nota sobre o cron.** O arq recusa subir um worker sem nenhuma função nem cron
+registrado. Como a S05 entrega o cron *vazio* (os jobs são da S19 e da S20), ele carrega
+um único job — `heartbeat` —, que também serve de sinal barato de "o cron está vivo" para
+o alerta da S22.
+
+---
+
+## D-19 · Relógio da VM do Docker no Windows atrapalha teste com TTL curto · S05
+
+**Sintoma.** Testes de agregação falhavam de forma intermitente, com o buffer sumindo do
+Redis no meio da rajada — a cara de uma corrida.
+
+**Causa.** Não era corrida. O relógio do Redis dentro da VM do Docker Desktop ficava
+~72s atrás do host e corrigia de uma vez; o salto para frente expira instantaneamente
+qualquer chave com TTL menor que o salto. Medido com `TIME` amostrado a cada 10ms.
+
+**Decisão.** Os testes usam TTL folgado (1h) no agregador. O default de produção
+(`aggregation_ttl_seconds = 900`) fica como está — em host com relógio sadio, 15 minutos
+é folga suficiente sobre o maior `debounce_seconds` configurável (60s).
+
+**Para quem for depurar isso de novo:** antes de suspeitar de concorrência em teste com
+TTL, compare `redis TIME` com o relógio do host.
+
+---
+
 ## Pendências de verificação
 
 Todas fechadas. Estado verificado ao fim da Fase 0, contra Postgres 16 real:
