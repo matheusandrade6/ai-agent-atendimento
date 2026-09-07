@@ -21,6 +21,8 @@ from typing import Any, Literal, Self
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.domain.conditions import ConditionError, parse_condition
+
 Weekday = Literal["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 WEEKDAYS: tuple[Weekday, ...] = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
@@ -181,6 +183,19 @@ class IntakeField(_Strict):
 class ConditionalIntake(_Strict):
     when: str = Field(description="Expressao avaliada sobre os campos ja coletados")
     require: list[IntakeField]
+
+    @model_validator(mode="after")
+    def _when_is_parseable(self) -> Self:
+        """`when` que nao parseia falha no onboarding, nao na primeira conversa.
+
+        Quem avalia a expressao e `app.domain.conditions`, em codigo — o modelo nunca
+        decide se um campo condicional passou a ser obrigatorio (secao 11.7).
+        """
+        try:
+            parse_condition(self.when)
+        except ConditionError as exc:
+            raise ValueError(str(exc)) from exc
+        return self
 
 
 class IntakeConfig(_Strict):

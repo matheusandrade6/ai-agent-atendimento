@@ -37,7 +37,7 @@ tenants, alucinação de horário/preço ou perda de mensagem**, use Opus.
 | S03 | Config de tenant (schema Pydantic + loader YAML) | 0 | Sonnet | S01 | ✅ feito |
 | S04 | Webhook WhatsApp: assinatura, dedup, roteamento | 1 | Sonnet | S02, S03 | ✅ feito |
 | S05 | Filas ARQ, debounce Redis, workers in/out | 1 | **Opus** | S04 | ✅ feito |
-| S06 | LLMProvider + engine de tool calling + prompt builder | 1 | **Opus** | S03, S05 | ⬜ |
+| S06 | LLMProvider + engine de tool calling + prompt builder | 1 | **Opus** | S03, S05 | ✅ feito |
 | S07 | Base de conhecimento: ingestão e recuperação (pgvector) | 1 | Sonnet | S02 | ⬜ |
 | S08 | Tools de leitura: `search_knowledge`, `list_services` | 1 | Sonnet | S06, S07 | ⬜ |
 | S09 | Guardrails de entrada e saída | 1 | **Opus** | S06 | ⬜ |

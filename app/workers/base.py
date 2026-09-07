@@ -45,7 +45,38 @@ async def on_startup(ctx: WorkerContext) -> None:
         window_seconds=settings.contact_rate_limit_window_seconds,
     )
     ctx["outbound"] = ArqOutboundQueue(redis=redis)
+    _install_agent(ctx, settings)
     log.info("worker_iniciado", environment=settings.environment)
+
+
+def _install_agent(ctx: WorkerContext, settings: Settings) -> None:
+    """Instala o motor do agente como `turn_handler` da fila de entrada (S06).
+
+    O import e local de proposito: `app.agent.runner` depende deste modulo para ler o
+    `ctx`, e importa-lo no topo fecharia um ciclo. Sem chave de API o worker sobe do
+    mesmo jeito, com o handler que so registra a rajada — e o que permite rodar
+    agregacao, fila e webhook em desenvolvimento sem gastar token.
+
+    O registro de tools comeca vazio: `search_knowledge` e `list_services` entram na S08,
+    o handoff na S10 e as tools de escrita na S15.
+    """
+    if not settings.anthropic_api_key:
+        log.warning("agente_sem_chave_de_api", detalhe="turno nao chamara o modelo")
+        return
+
+    from app.agent.audit import PostgresAuditSink
+    from app.agent.engine import AgentEngine
+    from app.agent.llm import AnthropicProvider
+    from app.agent.runner import install
+
+    install(
+        ctx,
+        AgentEngine(
+            provider=AnthropicProvider.from_settings(settings),
+            audit=PostgresAuditSink(settings),
+            max_iterations=settings.max_tool_iterations,
+        ),
+    )
 
 
 async def on_shutdown(ctx: WorkerContext) -> None:
