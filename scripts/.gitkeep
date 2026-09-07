@@ -1,0 +1,3 @@
+# scripts/ so ganha conteudo na S23 (onboard_tenant.py), mas o CI ja aponta o
+# ruff para ca. Diretorio vazio nao existe no checkout do git — sem este arquivo,
+# o lint falha antes de olhar uma linha de codigo.

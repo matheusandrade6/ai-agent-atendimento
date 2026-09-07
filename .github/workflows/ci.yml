@@ -45,10 +45,10 @@ jobs:
         run: python -m pip install -e ".[dev]"
 
       - name: Lint
-        run: ruff check app tests scripts
+        run: ruff check app tests migrations scripts
 
       - name: Formatacao
-        run: ruff format --check app tests scripts
+        run: ruff format --check app tests migrations scripts
 
       - name: Tipos
         run: mypy app
