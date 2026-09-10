@@ -423,6 +423,43 @@ quebrado que continua sendo servido.
 
 ---
 
+## D-25 · Reingestão substitui os chunks por completo, não faz upsert · S07
+
+**Contexto.** A 11.6 pede que reingerir um documento não duplique chunk. O número de
+chunks de um documento muda sempre que o conteúdo muda de tamanho — não há um `ordinal`
+estável para um upsert calcular contra.
+
+**Decisão.** `ingest_document` apaga, na mesma transação, todos os chunks do
+`document_id` e insere os novos apurados do conteúdo atual. Reingerir o mesmo conteúdo
+produz o mesmo conjunto de chunks; reingerir conteúdo editado produz exatamente o
+conjunto novo, sem sobra do anterior.
+
+**Consequência.** Mais I/O do que um upsert (apaga tudo, reinsere tudo) em troca de não
+precisar de lógica de diff. Para o volume de uma base de conhecimento por tenant (FAQ,
+políticas, instruções de preparo), o custo é irrelevante.
+
+---
+
+## D-26 · `EmbeddingProvider` ainda sem implementação real · S07
+
+**Contexto.** A 11.6 descreve o pipeline de RAG — chunk, embedding, top-k por cosseno —
+mas não escolhe fornecedor de embeddings, e o projeto não tem SDK de nenhum (a Anthropic
+não expõe endpoint de embeddings). `knowledge_chunks.embedding` já é `VECTOR(1536)`
+desde a S02.
+
+**Decisão.** `app/knowledge/embeddings.py` define a interface `EmbeddingProvider` e uma
+implementação local, `HashingEmbeddingProvider` — bag-of-words com hash, determinística,
+sem rede. Ela sustenta os testes de ingestão/recuperação (dedup, isolamento de tenant,
+corte de score) rodando offline no CI, mas não tem qualidade semântica de embedding
+real.
+
+**Consequência.** Antes de produção, alguém precisa escolher um fornecedor real (OpenAI,
+Voyage etc., respeitando a dimensão 1536 da coluna ou migrando-a) e implementar
+`EmbeddingProvider` sobre ele. Até lá, a busca funciona mecanicamente mas não é
+semântica de verdade — não usar `HashingEmbeddingProvider` fora de dev/teste.
+
+---
+
 ## Pendências de verificação
 
 Todas fechadas. Estado verificado ao fim da Fase 0, contra Postgres 16 real:
