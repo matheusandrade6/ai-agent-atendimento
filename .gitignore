@@ -14,3 +14,6 @@ build/
 htmlcov/
 .DS_Store
 .venv/
+
+# Saida gerada pelo graphify (grafo de conhecimento do projeto).
+graphify-out/

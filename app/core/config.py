@@ -51,8 +51,13 @@ class Settings(BaseSettings):
     # --- LLM ---
     anthropic_api_key: str = ""
     llm_model: str = "claude-sonnet-5"
-    llm_extraction_model: str = "claude-haiku-4-5-20251001"
+    llm_extraction_model: str = "claude-haiku-4-5"
     llm_max_tokens: int = 1024
+    # Pensamento adaptativo ligado, esforco baixo: o agente decide o que perguntar e
+    # quando chamar tool (decisao que se beneficia de raciocinio) sob um teto de custo
+    # por conversa medido em centavos (docs/DECISOES.md, D-20).
+    llm_thinking: bool = True
+    llm_effort: Literal["low", "medium", "high", "xhigh", "max"] = "low"
 
     # --- canais ---
     whatsapp_app_secret: str = ""

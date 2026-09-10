@@ -29,6 +29,9 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from app.core.config import Settings, get_settings
+from app.core.telemetry import get_logger
+
+log = get_logger(__name__)
 
 _engine: AsyncEngine | None = None
 _sessionmaker: async_sessionmaker[AsyncSession] | None = None
@@ -58,12 +61,20 @@ def get_sessionmaker(settings: Settings | None = None) -> async_sessionmaker[Asy
 
 
 async def dispose_engine() -> None:
-    """Fecha o pool. Usado no shutdown e entre testes."""
+    """Fecha o pool. Usado no shutdown e entre testes.
+
+    O cache e limpo **antes** de fechar, e a falha ao fechar e registrada em vez de
+    subir. A razao e o modo de falha oposto: um engine que nao conseguiu se despedir mas
+    continua cacheado envenena toda conexao seguinte, e o erro aparece longe da causa.
+    """
     global _engine, _sessionmaker
-    if _engine is not None:
-        await _engine.dispose()
-    _engine = None
-    _sessionmaker = None
+    engine, _engine, _sessionmaker = _engine, None, None
+    if engine is None:
+        return
+    try:
+        await engine.dispose()
+    except Exception:
+        log.warning("dispose_do_pool_falhou", exc_info=True)
 
 
 async def _set_local(session: AsyncSession, key: str, value: str) -> None:

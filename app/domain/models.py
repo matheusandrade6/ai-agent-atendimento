@@ -258,6 +258,11 @@ class Conversation(Base):
         JSONB, nullable=False, server_default=text("'{}'::jsonb")
     )
     summary: Mapped[str | None] = mapped_column(Text)
+    # Quantas mensagens ja entraram no `summary`. E o que faz o resumo rolante disparar
+    # a cada 15 mensagens novas mesmo quando um turno grava duas de uma vez (secao 11.7).
+    summary_message_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
     # Janela de 24h do WhatsApp: renovada a cada mensagem inbound (secao 14.1.4).
     service_window_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     silenced_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -293,7 +298,12 @@ class Message(Base):
     cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(10, 6))
     # Categoria de cobranca do WhatsApp: free | utility | marketing (secao 14.1.4).
     billing_category: Mapped[str | None] = mapped_column(Text)
-    created_at: Mapped[datetime] = _created_at()
+    # `clock_timestamp()`, nao `now()`: `now()` e o instante do inicio da transacao, e
+    # duas mensagens gravadas juntas ficariam com o mesmo `created_at`. Sem desempate
+    # (a PK e UUID aleatorio), a janela de contexto do agente sairia fora de ordem.
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("clock_timestamp()")
+    )
 
     __table_args__ = (
         # Dedup da reentrega da Meta (RNF-04). NULL nao colide: mensagens de saida

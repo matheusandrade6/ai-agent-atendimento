@@ -337,6 +337,92 @@ TTL, compare `redis TIME` com o relógio do host.
 
 ---
 
+## D-20 · Pensamento adaptativo com esforço baixo, e não pensamento desligado · S06
+
+**Contexto.** O agente decide *o que perguntar* e *quando chamar tool* — decisão que se
+beneficia de raciocínio. Mas roda sob `limits.max_llm_cost_usd_per_conversation`, cujo
+default é **US$ 0,15 para até 60 mensagens**: cerca de US$ 0,007 por turno no Sonnet 5.
+
+**Decisão.** `thinking: {"type": "adaptive"}` com `output_config.effort = "low"`, ambos
+em settings (`LLM_THINKING`, `LLM_EFFORT`) para subir por ambiente sem tocar no código.
+
+**Por que não desligar.** Com o pensamento desligado o modelo escreve chamada de tool no
+texto visível em vez de emitir o bloco `tool_use` — o turno "dá certo", a tool nunca roda
+e ninguém vê erro. Num loop de tool calling esse texto ainda contamina os turnos
+seguintes. Esforço baixo custa menos do que essa classe de bug.
+
+---
+
+## D-21 · O prompt sai em dois segmentos, com o corte de cache depois de `[ESTILO]` · S06
+
+**Contexto.** O cache de prompt é casamento de **prefixo**: um byte diferente invalida
+tudo dali para a frente. A ordem dos blocos da 11.2 mistura o que é estável (identidade,
+papel, limites, estilo) com o que muda a cada turno (intake, RAG, "agora").
+
+**Decisão.** `build_system_prompt` devolve dois `PromptSegment`: o estável, com
+`cache_breakpoint=True`, e o volátil. A ordem dos blocos da spec é preservada
+integralmente — o corte cai exatamente na fronteira entre os dois grupos.
+
+**Consequência.** Prefixo curto demais simplesmente não é cacheado pela API: não há erro,
+só não há desconto. `tests/unit/test_agent_prompt.py` prova que o segmento estável não
+contém nada que varie entre turnos — sem isso o cache nunca teria acerto e o desconto
+sumiria em silêncio.
+
+---
+
+## D-22 · Condição de intake tem interpretador próprio, não `eval` · S06
+
+**Contexto.** O YAML do tenant traz `when: "service.name contains 'vacina'"`. Alguém
+precisa avaliar isso, e quem avalia decide se um campo passa a ser obrigatório.
+
+**Decisão.** `app/domain/conditions.py` — gramática fechada de **uma** comparação:
+`caminho operador literal`. Nada mais parseia. `ConditionalIntake` valida a expressão no
+carregamento da config, então `when` torto derruba o onboarding e não a primeira conversa.
+
+**Por que não `eval`.** Arquivo de config é editado no onboarding de cliente, não é código
+de aplicação. `eval` transformaria um erro de digitação em execução arbitrária dentro do
+worker.
+
+**Detalhe que custou um teste.** O literal é ancorado no fim da expressão. Sem isso,
+`x == 'a' and y == 'b'` seria aceito como comparação contra o texto `'a' and y == 'b'` —
+não executaria nada, mas passaria despercebido até a pergunta condicional aparecer na
+hora errada.
+
+---
+
+## D-23 · `messages.created_at` usa `clock_timestamp()`, não `now()` · S06
+
+**Sintoma.** Teste de carga de histórico devolvendo a resposta do agente **antes** da
+pergunta do cliente.
+
+**Causa.** No Postgres, `now()` é o instante do **início da transação**. Duas mensagens
+gravadas na mesma transação — uma rajada que chega num único payload da Meta — recebem
+`created_at` idêntico. Como a PK é `gen_random_uuid()`, não existe critério de desempate:
+`ORDER BY created_at, id` ordena por um número aleatório.
+
+**Decisão.** Migration 0005 troca o default de `messages.created_at` para
+`clock_timestamp()`, que é o instante da própria linha. A janela de contexto do agente
+depende dessa ordem — histórico embaralhado é alucinação garantida, com o modelo
+"respondendo" antes de ser perguntado.
+
+---
+
+## D-24 · `dispose_engine` limpa o cache antes de fechar e engole a falha · S06
+
+**Sintoma.** Testes de integração falhando com `Event loop is closed` — sempre no teste
+*seguinte* ao que vazou a conexão.
+
+**Causa.** O engine é singleton de módulo e o pool guarda conexões amarradas ao event
+loop em que foram abertas. `dispose_engine` limpava as globais **depois** do
+`await engine.dispose()`; quando o dispose levantava, o engine quebrado continuava
+cacheado e envenenava toda conexão seguinte.
+
+**Decisão.** Limpar as globais primeiro e registrar a falha do `dispose()` em vez de
+propagá-la. Um pool que não conseguiu se despedir é um problema menor do que um engine
+quebrado que continua sendo servido.
+
+---
+
 ## Pendências de verificação
 
 Todas fechadas. Estado verificado ao fim da Fase 0, contra Postgres 16 real:
@@ -350,3 +436,13 @@ Todas fechadas. Estado verificado ao fim da Fase 0, contra Postgres 16 real:
 | Total: 42 testes | ✅ verde |
 | `ruff check` + `ruff format --check` | ✅ limpo |
 | `mypy --strict` | ✅ limpo (22 arquivos) |
+
+Estado ao fim da S06, contra Postgres 16 real:
+
+| Item | Estado |
+|---|---|
+| Migration `0005` (`upgrade` e `downgrade`) | ✅ aplicada e revertida |
+| Motor do agente, memória, prompt e condições | ✅ 132 testes novos |
+| Total: 230 testes | ✅ verde |
+| `ruff check` + `ruff format --check` | ✅ limpo |
+| `mypy --strict` | ✅ limpo (42 arquivos) |
