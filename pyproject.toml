@@ -10,6 +10,10 @@ dependencies = [
     "pydantic-settings>=2.6",
     "sqlalchemy[asyncio]>=2.0.36",
     "asyncpg>=0.30",
+    # Driver sincrono, ao lado do asyncpg. Nao e luxo de teste: o Alembic roda com a
+    # URL sem `+asyncpg` (migrations/env.py) e a imagem de producao carrega migrations
+    # e alembic.ini — sem ele, `alembic upgrade head` quebra no deploy, nao so no CI.
+    "psycopg2-binary>=2.9",
     "alembic>=1.14",
     "pgvector>=0.3.6",
     "redis>=5.2",

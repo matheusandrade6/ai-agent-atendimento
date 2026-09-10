@@ -47,6 +47,9 @@ services:
         condition: service_healthy
     profiles: ["full"]
 
+  # Worker unico: entrada, saida e cron no mesmo processo. Em producao, subir tres
+  # servicos com InboundWorkerSettings, OutboundWorkerSettings e CronWorkerSettings —
+  # uma rajada de 429 no envio nao pode segurar o processamento do que chega.
   worker:
     build: .
     command: arq app.workers.settings.WorkerSettings

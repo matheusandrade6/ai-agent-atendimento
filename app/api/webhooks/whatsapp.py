@@ -30,7 +30,7 @@ from app.core.db import tenant_session
 from app.core.telemetry import get_logger
 from app.core.time import now_utc
 from app.domain.tenant_registry import resolve_tenant_by_phone_number_id
-from app.workers.queue import InboundQueue
+from app.workers.queue import InboundMessage, InboundQueue
 
 log = get_logger(__name__)
 
@@ -165,7 +165,21 @@ async def _ingest_message(
         {"expires": now + SERVICE_WINDOW, "now": now, "conversation_id": conversation_id},
     )
 
-    await queue.enqueue_inbound(tenant_id=tenant_id, conversation_id=conversation_id)
+    # O conteudo vai junto: o buffer de agregacao (14.1.2) e que sabe o que ainda nao
+    # virou turno, e ele vive em Redis, nao numa coluna de "ja processada".
+    await queue.enqueue_inbound(
+        InboundMessage(
+            tenant_id=tenant_id,
+            conversation_id=conversation_id,
+            contact_id=contact_id,
+            channel="whatsapp",
+            message_id=inserted_id,
+            provider_msg_id=message.id,
+            content_type=content_type,
+            text=content,
+            media_ref=media_ref,
+        )
+    )
 
 
 async def _apply_status(

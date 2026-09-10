@@ -19,12 +19,12 @@ test:
 	pytest
 
 lint:
-	ruff check app tests scripts
+	ruff check app tests migrations scripts
 	mypy app
 
 fmt:
-	ruff check --fix app tests scripts
-	ruff format app tests scripts
+	ruff check --fix app tests migrations scripts
+	ruff format app tests migrations scripts
 
 dev:
 	uvicorn app.main:app --reload --port 8000
