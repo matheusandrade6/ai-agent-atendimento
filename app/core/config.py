@@ -59,6 +59,12 @@ class Settings(BaseSettings):
     llm_thinking: bool = True
     llm_effort: Literal["low", "medium", "high", "xhigh", "max"] = "low"
 
+    # --- base de conhecimento (RAG, secao 11.6) ---
+    knowledge_top_k: int = 5
+    # Abaixo do corte, o bloco de contexto do prompt vem vazio (RF-06): melhor declarar
+    # desconhecimento do que arriscar alucinacao com um trecho fracamente relacionado.
+    knowledge_min_score: float = 0.5
+
     # --- canais ---
     whatsapp_app_secret: str = ""
     whatsapp_verify_token: str = ""
