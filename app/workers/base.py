@@ -22,6 +22,7 @@ from app.core.config import Settings, get_settings
 from app.core.db import dispose_engine
 from app.core.telemetry import configure_logging, get_logger
 from app.domain.tenant_config import TenantConfig
+from app.knowledge.embeddings import EmbeddingProvider
 from app.workers.aggregator import ConversationAggregator
 from app.workers.queue import ArqOutboundQueue
 from app.workers.ratelimit import ContactRateLimiter
@@ -57,8 +58,8 @@ def _install_agent(ctx: WorkerContext, settings: Settings) -> None:
     mesmo jeito, com o handler que so registra a rajada — e o que permite rodar
     agregacao, fila e webhook em desenvolvimento sem gastar token.
 
-    O registro de tools comeca vazio: `search_knowledge` e `list_services` entram na S08,
-    o handoff na S10 e as tools de escrita na S15.
+    Tools de leitura entram na S08 (`search_knowledge`, `list_services`); handoff na
+    S10; tools de escrita na S15.
     """
     if not settings.anthropic_api_key:
         log.warning("agente_sem_chave_de_api", detalhe="turno nao chamara o modelo")
@@ -68,15 +69,29 @@ def _install_agent(ctx: WorkerContext, settings: Settings) -> None:
     from app.agent.engine import AgentEngine
     from app.agent.llm import AnthropicProvider
     from app.agent.runner import install
+    from app.agent.tools.registry import build_registry
 
     install(
         ctx,
         AgentEngine(
             provider=AnthropicProvider.from_settings(settings),
+            tools=build_registry(embeddings=_embedding_provider(settings), settings=settings),
             audit=PostgresAuditSink(settings),
             max_iterations=settings.max_tool_iterations,
         ),
     )
+
+
+def _embedding_provider(settings: Settings) -> EmbeddingProvider | None:
+    """`HashingEmbeddingProvider` nao tem qualidade semantica real (D-26): so serve fora
+    de producao. Sem fornecedor real ainda, `search_knowledge` fica de fora do registro
+    em vez de responder com relevancia falsa (D-27)."""
+    if settings.environment in ("local", "test"):
+        from app.knowledge.embeddings import HashingEmbeddingProvider
+
+        return HashingEmbeddingProvider()
+    log.warning("embedding_provider_indisponivel", detalhe="search_knowledge desativada")
+    return None
 
 
 async def on_shutdown(ctx: WorkerContext) -> None:

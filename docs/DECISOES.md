@@ -460,6 +460,29 @@ semântica de verdade — não usar `HashingEmbeddingProvider` fora de dev/teste
 
 ---
 
+## D-27 · `search_knowledge` fica de fora do registro sem embeddings reais · S08
+
+**Contexto.** `app/agent/tools/registry.py` monta o `ToolRegistry` que o worker instala
+no motor. `search_knowledge` (S08) depende de um `EmbeddingProvider`, e D-26 proíbe usar
+`HashingEmbeddingProvider` fora de dev/teste.
+
+**Alternativa descartada.** Usar `HashingEmbeddingProvider` em qualquer ambiente até um
+fornecedor real existir. Contraria D-26 diretamente: a tool responderia com "relevância"
+vinda de hash de palavra, não de similaridade semântica — pior do que a tool não existir,
+porque o guardrail de saída (11.5) trata resultado de tool como fonte de verdade.
+
+**Decisão.** `build_registry(embeddings=...)` aceita `embeddings=None` e, nesse caso,
+registra só `list_services` (que não depende de embeddings). `app.workers.base` só passa
+um `HashingEmbeddingProvider` quando `settings.environment` é `local` ou `test`; fora
+disso, `search_knowledge` fica ausente do catálogo de tools e um aviso é logado — o
+motor continua funcionando com o resto do conjunto.
+
+**Consequência.** Quando um `EmbeddingProvider` real existir, `_embedding_provider` em
+`app/workers/base.py` é o único ponto a trocar; nada no motor, no registro ou na tool
+muda.
+
+---
+
 ## Pendências de verificação
 
 Todas fechadas. Estado verificado ao fim da Fase 0, contra Postgres 16 real:
