@@ -96,6 +96,9 @@ class Settings(BaseSettings):
     outbound_backoff_max_seconds: float = 300.0
     # Janela de idempotencia do envio: uma resposta com a mesma chave nao sai duas vezes.
     outbound_idempotency_ttl_seconds: int = 86400
+    # Intervalo entre as partes de uma resposta quebrada por `max_message_chars` (11.5).
+    # Garante a ordem na fila e, de quebra, faz a conversa parecer digitada.
+    outbound_part_delay_seconds: float = 1.5
     worker_max_jobs: int = 10
     worker_job_timeout_seconds: int = 120
     worker_keep_result_seconds: int = 3600

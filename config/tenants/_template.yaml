@@ -62,9 +62,17 @@ escalation:
   business_hours_only: false
   notify: []
   triggers:
+    # Um gatilho casa por palavra-chave, por regex, por intencao embutida
+    # (ask_for_human, medical_advice) ou por condicao sobre sinais do turno.
+    # Quando mais de um casa, ganha o de acao mais grave — nao o primeiro do arquivo.
     - id: pedido_humano
       match_intent: ask_for_human
       action: escalate
+    # - id: emergencia
+    #   match_keywords: ["urgente", "emergencia"]
+    #   match_regex: ["nao\s+(?:esta\s+)?respirand"]   # sem acento, minusculas
+    #   action: escalate_immediately
+    #   reply: "Vou chamar alguem da equipe agora."
   handoff_silence_minutes: 120
 
 messages:

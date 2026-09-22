@@ -483,6 +483,92 @@ muda.
 
 ---
 
+## D-28 · O rate limit fica no worker; o guardrail só declara o contrato · S09
+
+**Contexto.** A seção 11.5 lista rate limit como guardrail de entrada, e a S05 já tinha
+implementado `ContactRateLimiter` (Redis) dentro de `flush_conversation`, antes de o turno
+existir.
+
+**Alternativa descartada.** Mover a contagem para dentro de `InputGuardrail`, no motor.
+Ficaria mais coeso no papel, mas o flood passaria a carregar config do tenant e o estado
+da conversa **antes** de ser descartado — duas idas ao banco por mensagem de flood,
+exatamente no cenário em que se quer gastar menos.
+
+**Decisão.** O contador continua em `app/workers/ratelimit.py`, chamado no ponto mais
+barato. `app/agent/guardrails.py` declara o protocolo `TurnRateLimiter` e aceita um
+limiter opcional; em produção (`workers/base.py`) ele vai vazio, porque o worker já
+contou. O campo existe para os caminhos que não passam pelo worker de entrada: o runner
+conversacional (S11) e o widget web (S21).
+
+**Consequência.** Quem lê `guardrails.py` sozinho vê o rate limit como contrato, não como
+implementação. O teste do anti-flood continua em `tests/unit/test_worker_settings.py` e o
+do protocolo, em `tests/unit/test_guardrails.py`.
+
+---
+
+## D-29 · Base de conhecimento e horário de funcionamento também são evidência · S09
+
+**Contexto.** A 11.5 diz que um horário na resposta precisa vir de `check_availability`
+ou `confirm_appointment` no mesmo turno.
+
+**Problema.** Lido ao pé da letra, o agente fica proibido de responder "atendemos das 8h
+às 19h" — que é FAQ, não agenda, e é uma das perguntas mais comuns no balcão. A resposta
+certa seria descartada, regenerada e, na segunda, viraria handoff.
+
+**Decisão.** `Evidence` tem três conjuntos separados: `slots` (pares data+hora que saíram
+juntos de um resultado de tool), `times` e `dates` (referências soltas legítimas — RAG,
+catálogo, e as **bordas** das janelas de `business_hours`). Uma promessa de agenda exige
+`slots`; uma citação de horário de funcionamento se resolve com `times`. O meio da janela
+nunca entra: é exatamente ali que mora a vaga inventada.
+
+**Consequência.** A distinção entre "informar" e "prometer" é feita por linguagem de
+oferta/confirmação (`_OFFER` em `guardrails.py`) mais a regra de que hora vinda de slot
+real sempre é conferida como par. Toda folga nova nessa fronteira precisa de um teste em
+`tests/unit/test_guardrails.py` que prove os dois lados — o caso que passa e o que não.
+
+---
+
+## D-30 · Detecção de prompt injection registra, não bloqueia · S09
+
+**Contexto.** A 11.5 pede detecção de tentativa de prompt injection no conteúdo recebido.
+
+**Alternativa descartada.** Curto-circuitar a conversa quando o detector marca. Daria a
+qualquer pessoa um jeito trivial de se negar atendimento — "ignora o que eu falei antes"
+é português comum — e trocaria uma defesa que funciona por uma que só parece funcionar.
+
+**Decisão.** A defesa contra injeção é estrutural e já existe: conteúdo de terceiro entra
+delimitado em `<dado>` (`app.agent.prompt.wrap_user_content`, invariante 7) e o bloco
+`[LIMITES INEGOCIÁVEIS]` diz ao modelo que ali dentro é dado. `detect_injection` devolve
+as marcas encontradas, que vão para log e para `InputDecision.injection_flags` — métrica
+e trilha, não filtro.
+
+**Consequência.** A métrica de tentativas de injeção por tenant (S22) sai daí. Se algum
+dia houver ação automática sobre a marca, ela precisa de um critério muito mais estreito
+do que o detector atual.
+
+---
+
+## D-31 · Resposta quebrada vira N mensagens, com adiamento crescente · S09
+
+**Contexto.** O guardrail de saída quebra a resposta por `persona.max_message_chars`
+(11.5). Até a S09, o turno gravava uma linha em `messages` e publicava um job de saída.
+
+**Problema.** A fila do arq não promete ordem entre jobs publicados no mesmo instante, e
+o backoff de retentativa pode reordenar. Uma resposta quebrada chegando fora de ordem é
+pior do que uma mensagem longa.
+
+**Decisão.** `TurnOutcome.messages` carrega as partes; `persist_turn` grava **uma linha
+por parte** (o painel mostra o que a pessoa recebeu) e o handler publica um job por parte
+com `defer_seconds = índice * outbound_part_delay_seconds` (default 1.5s). Tokens e custo
+vão só na primeira linha: são do turno, não da mensagem, e repeti-los multiplicaria o
+número que o disjuntor lê para decidir escalar.
+
+**Consequência.** A ordem passa a depender do relógio do Redis, não da sorte. O efeito
+colateral — as mensagens chegando com alguns segundos entre si — é o comportamento
+desejado no WhatsApp. `OutboundQueue.enqueue_outbound` ganhou `defer_seconds`.
+
+---
+
 ## Pendências de verificação
 
 Todas fechadas. Estado verificado ao fim da Fase 0, contra Postgres 16 real:
@@ -506,3 +592,18 @@ Estado ao fim da S06, contra Postgres 16 real:
 | Total: 230 testes | ✅ verde |
 | `ruff check` + `ruff format --check` | ✅ limpo |
 | `mypy --strict` | ✅ limpo (42 arquivos) |
+
+---
+
+Estado ao fim da S09, contra Postgres 16 real:
+
+| Item | Estado |
+|---|---|
+| Migrations `0001`–`0005` | ✅ aplicadas (`0005 (head)`) |
+| Gramática temporal pt-BR | ✅ 82 testes novos |
+| Guardrails de entrada e saída | ✅ 62 testes novos |
+| Guardrails dentro do motor (regeneração e escalonamento) | ✅ 15 testes novos |
+| Persistência da resposta quebrada (D-31) | ✅ verde contra banco real |
+| Total: 422 testes, nenhum pulado | ✅ verde |
+| `ruff check` + `ruff format --check` | ✅ limpo |
+| `mypy --strict` | ✅ limpo (50 arquivos) |

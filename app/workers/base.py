@@ -60,6 +60,10 @@ def _install_agent(ctx: WorkerContext, settings: Settings) -> None:
 
     Tools de leitura entram na S08 (`search_knowledge`, `list_services`); handoff na
     S10; tools de escrita na S15.
+
+    Os guardrails da S09 sao instalados sempre — nao ha modo "sem guardrail" em
+    producao. O de entrada vai **sem** rate limiter: o anti-flood ja rodou em
+    `flush_conversation`, antes de carregar config e conversa (docs/DECISOES.md, D-28).
     """
     if not settings.anthropic_api_key:
         log.warning("agente_sem_chave_de_api", detalhe="turno nao chamara o modelo")
@@ -67,6 +71,7 @@ def _install_agent(ctx: WorkerContext, settings: Settings) -> None:
 
     from app.agent.audit import PostgresAuditSink
     from app.agent.engine import AgentEngine
+    from app.agent.guardrails import InputGuardrail, OutputGuardrail
     from app.agent.llm import AnthropicProvider
     from app.agent.runner import install
     from app.agent.tools.registry import build_registry
@@ -78,6 +83,8 @@ def _install_agent(ctx: WorkerContext, settings: Settings) -> None:
             tools=build_registry(embeddings=_embedding_provider(settings), settings=settings),
             audit=PostgresAuditSink(settings),
             max_iterations=settings.max_tool_iterations,
+            input_guardrail=InputGuardrail(),
+            output_guardrail=OutputGuardrail(),
         ),
     )
 
