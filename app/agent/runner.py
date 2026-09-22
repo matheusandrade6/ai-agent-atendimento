@@ -125,35 +125,45 @@ async def persist_turn(
     *,
     message_count: int,
     settings: Settings | None = None,
-) -> uuid.UUID | None:
-    """Grava a resposta com tokens e custo, e atualiza o estado da conversa (passo 9).
+) -> list[uuid.UUID]:
+    """Grava as mensagens do turno com tokens e custo, e atualiza a conversa (passo 9).
 
     Tudo numa transacao so: uma resposta gravada com o `stage` antigo, ou um `collected`
     atualizado sem a mensagem que o gerou, deixam a proxima conversa mentindo.
+
+    Uma linha por mensagem enviada, porque o guardrail de saida pode ter quebrado a
+    resposta em varias (11.5) e o painel precisa mostrar o que a pessoa realmente
+    recebeu. **Tokens e custo vao so na primeira linha**: eles sao do turno, nao da
+    mensagem, e repeti-los multiplicaria o custo da conversa — que e exatamente o numero
+    que o disjuntor le para decidir escalar.
     """
+    parts = _messages_of(outcome)
     async with tenant_session(tenant_id, settings) as session:
-        message_id: uuid.UUID | None = None
-        if outcome.reply.strip():
-            message_id = (
-                await session.execute(
-                    sa.text(
-                        "INSERT INTO messages (tenant_id, conversation_id, direction, author,"
-                        " content_type, content, tool_calls, tokens_in, tokens_out, cost_usd)"
-                        " VALUES (:tenant_id, :conversation_id, 'outbound', 'agent', 'text',"
-                        " :content, CAST(:tool_calls AS jsonb), :tokens_in, :tokens_out,"
-                        " :cost_usd) RETURNING id"
-                    ),
-                    {
-                        "tenant_id": tenant_id,
-                        "conversation_id": conversation_id,
-                        "content": outcome.reply,
-                        "tool_calls": _tool_calls_json(outcome),
-                        "tokens_in": outcome.usage.total_input_tokens,
-                        "tokens_out": outcome.usage.output_tokens,
-                        "cost_usd": outcome.cost_usd,
-                    },
-                )
-            ).scalar_one()
+        message_ids: list[uuid.UUID] = []
+        for index, text in enumerate(parts):
+            first = index == 0
+            message_ids.append(
+                (
+                    await session.execute(
+                        sa.text(
+                            "INSERT INTO messages (tenant_id, conversation_id, direction,"
+                            " author, content_type, content, tool_calls, tokens_in, tokens_out,"
+                            " cost_usd) VALUES (:tenant_id, :conversation_id, 'outbound',"
+                            " 'agent', 'text', :content, CAST(:tool_calls AS jsonb), :tokens_in,"
+                            " :tokens_out, :cost_usd) RETURNING id"
+                        ),
+                        {
+                            "tenant_id": tenant_id,
+                            "conversation_id": conversation_id,
+                            "content": text,
+                            "tool_calls": _tool_calls_json(outcome) if first else _json({}),
+                            "tokens_in": outcome.usage.total_input_tokens if first else 0,
+                            "tokens_out": outcome.usage.output_tokens if first else 0,
+                            "cost_usd": outcome.cost_usd if first else Decimal(0),
+                        },
+                    )
+                ).scalar_one()
+            )
 
         params: dict[str, Any] = {
             "id": conversation_id,
@@ -176,7 +186,16 @@ async def persist_turn(
         await session.execute(
             sa.text(f"UPDATE conversations SET {', '.join(sets)} WHERE id = :id"), params
         )
-    return message_id
+    return message_ids
+
+
+def _messages_of(outcome: TurnOutcome) -> tuple[str, ...]:
+    """As partes a enviar. `messages` e a fonte; `reply` cobre quem construiu o outcome
+    a mao (teste, painel) sem passar pelo guardrail de saida."""
+    parts = tuple(text for text in outcome.messages if text.strip())
+    if parts:
+        return parts
+    return (outcome.reply.strip(),) if outcome.reply.strip() else ()
 
 
 @dataclass(slots=True)
@@ -210,11 +229,12 @@ class AgentTurnHandler:
             )
         )
 
-        message_id = await persist_turn(
+        texts = _messages_of(outcome)
+        message_ids = await persist_turn(
             turn.tenant_id,
             turn.conversation_id,
             outcome,
-            message_count=loaded.state.message_count + (1 if outcome.reply.strip() else 0),
+            message_count=loaded.state.message_count + len(texts),
             settings=settings,
         )
         log.info(
@@ -226,20 +246,27 @@ class AgentTurnHandler:
             tokens_out=outcome.usage.output_tokens,
             custo_usd=str(outcome.cost_usd),
             escalonou=outcome.escalate,
+            partes=len(texts),
+            violacoes=list(outcome.violations),
+            regenerou=outcome.regenerated,
         )
-        if message_id is None:
-            return
 
-        await ctx_outbound(ctx).enqueue_outbound(
-            OutboundMessage(
-                tenant_id=turn.tenant_id,
-                conversation_id=turn.conversation_id,
-                text=outcome.reply,
-                # A chave e da mensagem gravada: reentrega do job nao manda duas vezes
-                # o mesmo texto (invariante 5, ver `app.workers.outbound`).
-                idempotency_key=str(message_id),
+        outbound = ctx_outbound(ctx)
+        delay = settings.outbound_part_delay_seconds
+        for index, (message_id, text) in enumerate(zip(message_ids, texts, strict=True)):
+            await outbound.enqueue_outbound(
+                OutboundMessage(
+                    tenant_id=turn.tenant_id,
+                    conversation_id=turn.conversation_id,
+                    text=text,
+                    # A chave e da mensagem gravada: reentrega do job nao manda duas
+                    # vezes o mesmo texto (invariante 5, ver `app.workers.outbound`).
+                    idempotency_key=str(message_id),
+                ),
+                # A parte 2 espera a 1: a fila nao promete ordem entre jobs publicados
+                # no mesmo instante, e uma resposta quebrada fora de ordem confunde.
+                defer_seconds=index * delay,
             )
-        )
 
 
 def install(ctx: WorkerContext, engine: AgentEngine) -> None:

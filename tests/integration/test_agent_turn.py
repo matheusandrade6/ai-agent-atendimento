@@ -17,6 +17,7 @@ import pytest
 import sqlalchemy as sa
 
 from app.agent.engine import AgentEngine
+from app.agent.guardrails import OutputGuardrail
 from app.agent.runner import AgentTurnHandler, load_state
 from app.core.config import Settings
 from app.core.db import dispose_engine
@@ -33,9 +34,15 @@ WA_ID = "5511977776666"
 class FakeOutboundQueue:
     def __init__(self) -> None:
         self.sent: list[OutboundMessage] = []
+        #: Adiamento pedido por parte. E o que prova a ordem de uma resposta quebrada
+        #: pelo guardrail de saida (11.5) — a fila nao promete ordem sozinha.
+        self.defers: list[float] = []
 
-    async def enqueue_outbound(self, message: OutboundMessage) -> None:
+    async def enqueue_outbound(
+        self, message: OutboundMessage, *, defer_seconds: float = 0.0
+    ) -> None:
         self.sent.append(message)
+        self.defers.append(defer_seconds)
 
     async def close(self) -> None:
         return None
@@ -222,6 +229,46 @@ async def test_turno_enfileira_a_resposta_com_a_chave_da_mensagem(
     assert enviado.idempotency_key == str(rows[0].id)
 
 
+async def test_resposta_quebrada_vira_uma_linha_e_um_job_por_parte(
+    sync_engine: sa.Engine, ctx: WorkerContext, conversation: dict[str, Any]
+) -> None:
+    """A quebra por `max_message_chars` (11.5) tem de sobreviver ate o banco e a fila.
+
+    Tres coisas sob teste, e as tres so o Postgres prova: uma linha por mensagem
+    enviada (o painel mostra o que a pessoa recebeu), **custo so na primeira** (repetir
+    multiplicaria o numero que o disjuntor le), e adiamento crescente por parte (a fila
+    nao promete ordem entre jobs publicados no mesmo instante).
+    """
+    _insert_messages(sync_engine, conversation, [("inbound", "me conta tudo")])
+    longa = " ".join(["Tudo certo por aqui, seguimos no horario combinado."] * 20)
+    handler = AgentTurnHandler(
+        AgentEngine(
+            provider=ScriptedProvider(script=[text_response(longa)]),
+            extract=False,
+            output_guardrail=OutputGuardrail(),
+        )
+    )
+
+    await handler(ctx, _turn(conversation))
+
+    queue: FakeOutboundQueue = ctx["outbound"]
+    assert len(queue.sent) > 1
+    assert queue.defers == sorted(queue.defers)
+    assert queue.defers[0] == 0.0
+
+    rows = _rows(
+        sync_engine,
+        "SELECT id, content, cost_usd FROM messages WHERE conversation_id = :id"
+        " AND direction = 'outbound' ORDER BY created_at",
+        {"id": conversation["conversation_id"]},
+    )
+    assert len(rows) == len(queue.sent)
+    assert [row.content for row in rows] == [msg.text for msg in queue.sent]
+    assert [str(row.id) for row in rows] == [msg.idempotency_key for msg in queue.sent]
+    assert rows[0].cost_usd == Decimal("0.004000")
+    assert all(row.cost_usd == Decimal(0) for row in rows[1:])
+
+
 async def test_turno_atualiza_collected_e_stage(
     sync_engine: sa.Engine, ctx: WorkerContext, conversation: dict[str, Any]
 ) -> None:
@@ -278,7 +325,11 @@ async def test_resumo_rolante_grava_texto_e_contador(
     assert loaded.state.summarized_message_count == 16
 
 
-async def test_turno_de_tenant_inexistente_nao_estoura(ctx: WorkerContext) -> None:
+async def test_turno_de_tenant_inexistente_nao_estoura(
+    require_db: None, ctx: WorkerContext
+) -> None:
+    """Sem `require_db` este teste tentava conectar e falhava em vez de pular — ele
+    consulta `tenants` para descobrir que o tenant nao existe."""
     handler = AgentTurnHandler(AgentEngine(provider=ScriptedProvider()))
     turn = AggregatedTurn(
         tenant_id=uuid.uuid4(),

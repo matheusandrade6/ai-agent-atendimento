@@ -19,6 +19,7 @@ continua sendo erro.
 from __future__ import annotations
 
 import uuid
+from datetime import timedelta
 from typing import Any, Literal, Protocol
 
 from arq import ArqRedis, create_pool
@@ -90,7 +91,9 @@ class InboundQueue(Protocol):
 
 
 class OutboundQueue(Protocol):
-    async def enqueue_outbound(self, message: OutboundMessage) -> None: ...
+    async def enqueue_outbound(
+        self, message: OutboundMessage, *, defer_seconds: float = 0.0
+    ) -> None: ...
 
     async def close(self) -> None: ...
 
@@ -176,9 +179,19 @@ class ArqOutboundQueue:
             raise RuntimeError("produtor de saida sem pool de Redis")
         return await self._pool.pool()
 
-    async def enqueue_outbound(self, message: OutboundMessage) -> None:
+    async def enqueue_outbound(
+        self, message: OutboundMessage, *, defer_seconds: float = 0.0
+    ) -> None:
+        """Publica a resposta. `defer_seconds` ordena as partes de uma resposta quebrada.
+
+        A fila do arq nao promete ordem entre jobs publicados no mesmo instante, e uma
+        resposta quebrada por `max_message_chars` (11.5) chegando fora de ordem e pior
+        do que uma mensagem longa. O adiamento crescente por parte resolve isso com o
+        efeito colateral de a conversa parecer digitada, que e o que se quer no WhatsApp.
+        """
         redis = await self._redis()
-        await redis.enqueue_job(OUTBOUND_JOB_NAME, message.as_payload())
+        defer = timedelta(seconds=defer_seconds) if defer_seconds > 0 else None
+        await redis.enqueue_job(OUTBOUND_JOB_NAME, message.as_payload(), _defer_by=defer)
 
     async def close(self) -> None:
         """Fecha so o que e nosso: o pool emprestado pertence a quem o abriu."""

@@ -232,6 +232,9 @@ class NotifyTarget(_Strict):
 class EscalationTrigger(_Strict):
     id: str
     match_keywords: list[str] = Field(default_factory=list)
+    #: Expressao regular, para o que palavra-chave nao alcanca ("nao (esta |)respirando").
+    #: Avaliada contra o texto sem acento e em minusculas (`app.agent.guardrails`).
+    match_regex: list[str] = Field(default_factory=list)
     match_intent: str | None = None
     condition: str | None = None
     action: Literal[
@@ -241,10 +244,27 @@ class EscalationTrigger(_Strict):
 
     @model_validator(mode="after")
     def _needs_a_matcher(self) -> Self:
-        if not (self.match_keywords or self.match_intent or self.condition):
+        if not (self.match_keywords or self.match_regex or self.match_intent or self.condition):
             raise ValueError(
-                f"trigger '{self.id}': precisa de match_keywords, match_intent ou condition"
+                f"trigger '{self.id}': precisa de match_keywords, match_regex, "
+                f"match_intent ou condition"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _regex_compiles(self) -> Self:
+        """Regex quebrada falha no onboarding, nao na primeira emergencia.
+
+        Um `re.error` em tempo de conversa aconteceria dentro do guardrail de entrada —
+        o caminho que existe justamente para uma mensagem de emergencia nao se perder.
+        """
+        for expression in self.match_regex:
+            try:
+                re.compile(expression)
+            except re.error as exc:
+                raise ValueError(
+                    f"trigger '{self.id}': match_regex invalida ({expression!r}): {exc}"
+                ) from exc
         return self
 
 
