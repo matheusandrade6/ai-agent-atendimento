@@ -160,6 +160,17 @@ async def test_estado_carregado_traz_historico_coletado_e_custo(
     assert loaded.channel == "whatsapp"
 
 
+async def test_estado_carregado_traz_status_e_silenced_until(
+    sync_engine: sa.Engine, settings: Settings, conversation: dict[str, Any]
+) -> None:
+    """S10: o passo 0 do turno (`HandoffService.should_run_turn`) decide a partir daqui."""
+    loaded = await load_state(conversation["tenant_id"], conversation["conversation_id"], settings)
+
+    assert loaded is not None
+    assert loaded.status == "active"
+    assert loaded.silenced_until is None
+
+
 async def test_mensagens_da_mesma_transacao_saem_na_ordem_certa(
     sync_engine: sa.Engine, settings: Settings, conversation: dict[str, Any]
 ) -> None:
