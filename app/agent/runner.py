@@ -9,30 +9,47 @@ teste de persistencia nao precisa de LLM.
 
 `turn_handler` do worker
 ------------------------
-`install(ctx, engine)` instala este handler no `ctx` do arq, na chave que a S05 deixou
-reservada. Sem instalacao, o worker segue com o handler que so registra a rajada.
+`install(ctx, engine, handoff)` instala este handler no `ctx` do arq, na chave que a S05
+deixou reservada. Sem instalacao, o worker segue com o handler que so registra a rajada.
+
+Handoff (S10)
+-------------
+Antes de chamar o motor, o handler pergunta a `app.agent.handoff.HandoffService` se o
+turno pode rodar (RF-28: com handoff ativo e dentro do prazo, o agente fica em silencio).
+Depois do turno, se `TurnOutcome.escalate` vier `True` — por gatilho de entrada, pela
+tool `escalate_to_human` ou pelo disjuntor/teto do motor — o mesmo servico abre o
+handoff, silencia a conversa e notifica o responsavel (RF-26, RF-27).
 """
 
 from __future__ import annotations
 
 import json
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
 import sqlalchemy as sa
 
-from app.agent.engine import AgentEngine, ConversationState, TurnOutcome, TurnRequest
+from app.agent.engine import (
+    AgentEngine,
+    ConversationState,
+    TurnOutcome,
+    TurnRequest,
+    last_inbound_text,
+)
+from app.agent.handoff import HandoffService, WhatsAppHandoffNotifier, triggered_by_for
 from app.agent.memory import StoredMessage, should_summarize
 from app.agent.prompt import PersonContext
 from app.core.config import Settings
 from app.core.db import tenant_session
 from app.core.telemetry import get_logger
-from app.core.time import now_in
+from app.core.time import now_in, now_utc
+from app.domain.tenant_config import TenantConfig
 from app.domain.tenant_registry import load_config_by_tenant_id
 from app.workers.aggregator import AggregatedTurn
-from app.workers.base import WorkerContext, ctx_outbound, ctx_settings
+from app.workers.base import WorkerContext, channel_for, ctx_outbound, ctx_settings
 from app.workers.queue import OutboundMessage
 
 log = get_logger(__name__)
@@ -50,6 +67,9 @@ class LoadedConversation:
     contact_id: uuid.UUID
     channel: str
     contact_name: str | None
+    #: `status`/`silenced_until` alimentam o passo 0 do turno (RF-28, `HandoffService`).
+    status: str
+    silenced_until: datetime | None
 
 
 async def load_state(
@@ -66,7 +86,8 @@ async def load_state(
             await session.execute(
                 sa.text(
                     "SELECT c.contact_id, c.channel, c.stage, c.collected, c.summary,"
-                    " c.summary_message_count, ct.name AS contact_name"
+                    " c.summary_message_count, c.status, c.silenced_until,"
+                    " ct.name AS contact_name"
                     " FROM conversations c JOIN contacts ct ON ct.id = c.contact_id"
                     " WHERE c.id = :id"
                 ),
@@ -115,6 +136,8 @@ async def load_state(
         contact_id=row.contact_id,
         channel=row.channel,
         contact_name=row.contact_name,
+        status=row.status,
+        silenced_until=row.silenced_until,
     )
 
 
@@ -203,6 +226,9 @@ class AgentTurnHandler:
     """Handler de turno instalado no worker de entrada (S05)."""
 
     engine: AgentEngine
+    #: Sem servico explicito, usa um com `NullAuditSink` — serve para teste que nao
+    #: escala; producao sempre passa o seu, com `PostgresAuditSink` (`_install_agent`).
+    handoff: HandoffService = field(default_factory=HandoffService)
 
     async def __call__(self, ctx: WorkerContext, turn: AggregatedTurn) -> None:
         settings = ctx_settings(ctx)
@@ -214,6 +240,21 @@ class AgentTurnHandler:
         loaded = await load_state(turn.tenant_id, turn.conversation_id, settings)
         if loaded is None:
             log.warning("turno_sem_conversa")
+            return
+
+        now = now_utc()
+        pode_rodar = await self.handoff.should_run_turn(
+            tenant_id=turn.tenant_id,
+            conversation_id=turn.conversation_id,
+            status=loaded.status,
+            silenced_until=loaded.silenced_until,
+            now=now,
+        )
+        if not pode_rodar:
+            # RF-28: com handoff ativo e dentro do prazo de silencio, o agente nao
+            # responde — nem chama o modelo. A mensagem que chegou ja foi persistida
+            # pelo webhook (S04); so o turno que fica de fora.
+            log.info("turno_silenciado_handoff", status=loaded.status)
             return
 
         outcome = await self.engine.run_turn(
@@ -251,6 +292,9 @@ class AgentTurnHandler:
             regenerou=outcome.regenerated,
         )
 
+        if outcome.escalate:
+            await self._open_handoff(ctx, turn, config, loaded, outcome, now)
+
         outbound = ctx_outbound(ctx)
         delay = settings.outbound_part_delay_seconds
         for index, (message_id, text) in enumerate(zip(message_ids, texts, strict=True)):
@@ -268,14 +312,59 @@ class AgentTurnHandler:
                 defer_seconds=index * delay,
             )
 
+    async def _open_handoff(
+        self,
+        ctx: WorkerContext,
+        turn: AggregatedTurn,
+        config: TenantConfig,
+        loaded: LoadedConversation,
+        outcome: TurnOutcome,
+        now: datetime,
+    ) -> None:
+        """Abre o handoff do turno que acabou de escalar (RF-26..RF-30).
 
-def install(ctx: WorkerContext, engine: AgentEngine) -> None:
-    ctx["turn_handler"] = AgentTurnHandler(engine)
+        So dispara depois de `persist_turn`: o resumo usa o `summary` que o proprio
+        turno pode ter regenerado, e o canal de notificacao depende da config do
+        tenant, que so faz sentido resolver aqui, nao dentro do motor (que e puro em
+        relacao a banco e rede).
+        """
+        channel = channel_for(ctx, config)
+        notifier = WhatsAppHandoffNotifier(channel) if channel is not None else None
+        reason = outcome.escalation_reason or "sem_motivo_informado"
+        await self.handoff.open(
+            tenant_id=turn.tenant_id,
+            conversation_id=turn.conversation_id,
+            config=config,
+            reason=reason,
+            triggered_by=triggered_by_for(outcome.escalation_reason),
+            summary=_handoff_summary(loaded, outcome),
+            now=now,
+            notifier=notifier,
+        )
+
+
+def install(ctx: WorkerContext, engine: AgentEngine, handoff: HandoffService | None = None) -> None:
+    ctx["turn_handler"] = AgentTurnHandler(engine, handoff or HandoffService())
 
 
 def _person_of(loaded: LoadedConversation) -> PersonContext:
     """Contexto de pessoa com o que o banco ja tem. Subjects e historico chegam na S08."""
     return PersonContext(contact_name=loaded.contact_name)
+
+
+def _handoff_summary(loaded: LoadedConversation, outcome: TurnOutcome) -> str:
+    """Resumo enviado na notificacao (RF-27).
+
+    Vem sempre de dado real da conversa — nunca de texto que o modelo tenha produzido
+    so para a escalada — na ordem: resumo rolante deste turno, resumo ja gravado, ou a
+    ultima rajada da pessoa.
+    """
+    if outcome.summary:
+        return outcome.summary
+    if loaded.state.summary:
+        return loaded.state.summary
+    text = last_inbound_text(loaded.state)
+    return text[:500] if text.strip() else "(sem historico)"
 
 
 def _tool_calls_json(outcome: TurnOutcome) -> str:

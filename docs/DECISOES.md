@@ -569,6 +569,49 @@ desejado no WhatsApp. `OutboundQueue.enqueue_outbound` ganhou `defer_seconds`.
 
 ---
 
+## D-32 · Handoff tem uma porta de entrada só; `escalate_to_human` so sinaliza · S10
+
+**Contexto.** RF-26 lista cinco origens de escalada: pedido explícito, gatilho de risco,
+baixa confiança repetida, falha de ferramenta e tópico fora de escopo. As duas primeiras
+já casam no guardrail de entrada (S09, `match_trigger`); as outras três só o próprio
+modelo percebe, no meio do turno.
+
+**Alternativa descartada.** Fazer a tool `escalate_to_human` abrir a linha em `handoffs`,
+silenciar a conversa e notificar o responsável ela mesma, dentro do handler da tool.
+Funcionaria, mas duplicaria a lógica de idempotência da notificação (RF-27, "enviada uma
+única vez") em cada origem — a tool, o disjuntor de custo/mensagens (11.5) e o teto de
+iterações teriam cada um seu próprio caminho para a mesma tabela.
+
+**Decisão.** `escalate_to_human` (`app/agent/tools/escalate_to_human.py`) só devolve
+`{"status": "escalated", "category": ..., "reason": ...}` — nunca toca banco. O motor
+(`app.agent.engine._tool_escalation_reason`) lê esse resultado e marca
+`TurnOutcome.escalate = True` com `escalation_reason = "tool:<motivo>"`, do mesmo jeito
+que já fazia para o disjuntor e o teto de iterações. `app.agent.runner.AgentTurnHandler`
+é a única porta que chama `HandoffService.open` — depois que o turno inteiro terminou,
+com o resumo e o canal de notificação já resolvidos. Silêncio e retomada (RF-28) seguem
+o mesmo padrão: `HandoffService.should_run_turn` é o único lugar que decide se o motor
+roda, lido a partir de `conversations.status`/`silenced_until` que `load_state` já traz.
+
+**`triggered_by` é derivado do prefixo do motivo, não plumbado à parte.**
+`app.agent.handoff.triggered_by_for` mapeia `"tool:"` → `agent` (o modelo decidiu),
+`"trigger:"` → `contact` (a pessoa escreveu algo que casou um gatilho de config), e o
+resto (disjuntor, teto de iterações, segunda falha do guardrail de saída) → `agent` ou
+`rule` conforme o caso. Evita adicionar um campo novo a `TurnOutcome` só para isso.
+
+**Retomada por timeout é preguiçosa, não um cron.** `should_run_turn` fecha o handoff e
+libera o turno **quando a próxima mensagem chega**, não num job varrendo conversas. Mais
+simples e suficiente: RF-28 só promete "o agente volta a responder" — nada exige que o
+`status` mude no banco antes de alguém escrever de novo. Se o painel (S17) precisar
+mostrar a conversa como "ativa" mesmo sem mensagem nova, um cron de varredura entra
+depois, sem mudar `should_run_turn`.
+
+**Só WhatsApp notifica de verdade.** `escalation.notify` aceita `whatsapp`, `email` e
+`panel` (S03), mas não existe provedor de email nem painel (S17) ainda.
+`WhatsAppHandoffNotifier` ignora os outros dois com log, sem falhar a abertura do
+handoff — RF-27 fica coberto pelo canal que toda config de exemplo já usa.
+
+---
+
 ## Pendências de verificação
 
 Todas fechadas. Estado verificado ao fim da Fase 0, contra Postgres 16 real:
@@ -607,3 +650,16 @@ Estado ao fim da S09, contra Postgres 16 real:
 | Total: 422 testes, nenhum pulado | ✅ verde |
 | `ruff check` + `ruff format --check` | ✅ limpo |
 | `mypy --strict` | ✅ limpo (50 arquivos) |
+
+---
+
+Estado ao fim da S10, contra Postgres 16 e Redis reais:
+
+| Item | Estado |
+|---|---|
+| Migrations `0001`–`0005` | ✅ aplicadas (`0005 (head)`) — nenhuma nova: `handoffs.summary`/`notified_at` e `conversations.silenced_until` já vinham da S02 (D-08) |
+| `escalate_to_human` (tool) + `app.agent.handoff` (serviço) | ✅ 24 testes novos |
+| Handoff ponta a ponta (silêncio, retomada por timeout, notificação única) | ✅ verde contra banco real |
+| Total: 446 testes, nenhum pulado | ✅ verde |
+| `ruff check` + `ruff format --check` | ✅ limpo |
+| `mypy --strict` | ✅ limpo (52 arquivos) |

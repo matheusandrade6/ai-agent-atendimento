@@ -8,13 +8,17 @@ externa (embeddings, banco) recebe essa dependencia aqui, nunca dentro do motor.
 fora de dev/teste, onde `HashingEmbeddingProvider` nao pode ser usado — D-26), o motor
 continua rodando com o resto do catalogo de tools, so sem RAG.
 
-Tools de escrita (`hold_slot`, `confirm_appointment`, ...) entram nas sessoes seguintes
-(S15) e se registram aqui do mesmo jeito.
+`escalate_to_human` (S10) nao depende de nada externo — entra sempre, mesmo sem
+embeddings, porque e a unica via do modelo para pedir handoff (11.5, RF-26).
+
+Tools de escrita de agendamento (`hold_slot`, `confirm_appointment`, ...) entram na S15
+e se registram aqui do mesmo jeito.
 """
 
 from __future__ import annotations
 
 from app.agent.tools.base import ToolRegistry
+from app.agent.tools.escalate_to_human import escalate_to_human_tool
 from app.agent.tools.list_services import list_services_tool
 from app.agent.tools.search_knowledge import search_knowledge_tool
 from app.core.config import Settings
@@ -26,8 +30,8 @@ __all__ = ["build_registry"]
 def build_registry(
     *, embeddings: EmbeddingProvider | None = None, settings: Settings | None = None
 ) -> ToolRegistry:
-    """Tools de leitura disponiveis hoje. Chamado uma vez por processo, no startup."""
-    specs = [list_services_tool(settings=settings)]
+    """Tools disponiveis hoje. Chamado uma vez por processo, no startup."""
+    specs = [list_services_tool(settings=settings), escalate_to_human_tool()]
     if embeddings is not None:
         specs.append(search_knowledge_tool(embeddings, settings=settings))
     return ToolRegistry(tuple(specs))

@@ -1,4 +1,4 @@
-"""Contrato de schema das tools de leitura (secao 11.4, aceite da S08).
+"""Contrato de schema das tools (secao 11.4, aceite da S08 e da S10).
 
 `tenant_id` nunca pode aparecer num `input_schema`: e a garantia de que o modelo nao
 tem como pedir para uma tool ler o banco de outro tenant (invariante 3). O schema
@@ -11,14 +11,16 @@ import json
 from typing import Any
 
 from app.agent.tools.base import ToolSpec
+from app.agent.tools.escalate_to_human import escalate_to_human_tool
 from app.agent.tools.list_services import list_services_tool
 from app.agent.tools.search_knowledge import search_knowledge_tool
 from app.knowledge.embeddings import HashingEmbeddingProvider
 
-ALL_TOOLS: tuple[ToolSpec, ...] = (
+READ_TOOLS: tuple[ToolSpec, ...] = (
     list_services_tool(),
     search_knowledge_tool(HashingEmbeddingProvider()),
 )
+ALL_TOOLS: tuple[ToolSpec, ...] = (*READ_TOOLS, escalate_to_human_tool())
 
 
 def _assert_valid_json_schema(schema: dict[str, Any]) -> None:
@@ -50,12 +52,24 @@ def test_tenant_id_nunca_aparece_em_input_schema() -> None:
         assert "tenant_id" not in serialized, tool.name
 
 
-def test_todas_sao_tools_de_leitura_com_nome_e_descricao() -> None:
+def test_todas_tem_nome_e_descricao() -> None:
     for tool in ALL_TOOLS:
         assert tool.name
         assert tool.description
+
+
+def test_tools_de_leitura_sao_kind_read() -> None:
+    for tool in READ_TOOLS:
         assert tool.kind == "read"
 
 
+def test_escalate_to_human_e_kind_write() -> None:
+    assert escalate_to_human_tool().kind == "write"
+
+
 def test_nomes_batem_com_a_tabela_da_11_4() -> None:
-    assert {tool.name for tool in ALL_TOOLS} == {"list_services", "search_knowledge"}
+    assert {tool.name for tool in ALL_TOOLS} == {
+        "list_services",
+        "search_knowledge",
+        "escalate_to_human",
+    }

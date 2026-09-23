@@ -402,6 +402,48 @@ async def test_conversa_cara_demais_escala_sem_chamar_o_modelo(config: TenantCon
     assert outcome.escalation_reason == "max_llm_cost_usd_per_conversation"
 
 
+# ------------------------------ handoff via tool (S10) ------------------------------
+
+
+async def test_escalate_to_human_bem_sucedida_escala_o_turno(config: TenantConfig) -> None:
+    """O proprio modelo pode decidir escalar (RF-26) — o motor precisa refletir isso em
+    `TurnOutcome.escalate`, nao so em `stage` (`next_stage` ja tratava o nome da tool)."""
+    from app.agent.tools.escalate_to_human import escalate_to_human_tool
+
+    provider = ScriptedProvider(
+        script=[
+            tool_response(
+                "escalate_to_human",
+                {"category": "fora_de_escopo", "reason": "pergunta sobre cirurgia complexa"},
+            ),
+            text_response("Vou chamar alguem da equipe para te ajudar com isso."),
+        ]
+    )
+    outcome = await make_engine(provider, escalate_to_human_tool()).run_turn(make_request(config))
+
+    assert outcome.escalate is True
+    assert outcome.escalation_reason == "tool:pergunta sobre cirurgia complexa"
+    assert outcome.stage == "handoff"
+    assert outcome.reply == "Vou chamar alguem da equipe para te ajudar com isso."
+
+
+async def test_escalate_to_human_que_falhou_nao_escala(config: TenantConfig) -> None:
+    """So a chamada bem-sucedida conta — argumento invalido nao pode virar handoff mudo."""
+    from app.agent.tools.escalate_to_human import escalate_to_human_tool
+
+    provider = ScriptedProvider(
+        script=[
+            tool_response("escalate_to_human", {"category": "categoria_invalida", "reason": "x"}),
+            text_response("Deixa eu tentar de outro jeito."),
+        ]
+    )
+    outcome = await make_engine(provider, escalate_to_human_tool()).run_turn(make_request(config))
+
+    assert outcome.tool_calls[0].ok is False
+    assert outcome.escalate is False
+    assert outcome.escalation_reason is None
+
+
 # --------------------------------- estagio ---------------------------------
 
 

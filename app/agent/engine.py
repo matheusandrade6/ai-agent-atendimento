@@ -281,7 +281,8 @@ class AgentEngine:
             usage += summary.usage
             cost += summary.cost
 
-        escalate = loop.escalate or guarded.escalate
+        tool_escalation = _tool_escalation_reason(calls)
+        escalate = loop.escalate or guarded.escalate or tool_escalation is not None
         stage = next_stage(
             request.state.stage,
             successful_tools=tuple(c.name for c in calls if c.ok),
@@ -301,7 +302,7 @@ class AgentEngine:
             iterations=loop.iterations + guarded.iterations,
             summary=summary.text if summary is not None else None,
             escalate=escalate,
-            escalation_reason=guarded.reason or loop.escalation_reason,
+            escalation_reason=guarded.reason or loop.escalation_reason or tool_escalation,
             model=guarded.model or loop.model,
             violations=guarded.violations,
             regenerated=guarded.regenerated,
@@ -709,6 +710,21 @@ def _trigger_signals(request: TurnRequest) -> dict[str, Any]:
         "collected_count": len(state.collected),
         "cost_usd": float(state.cost_so_far_usd),
     }
+
+
+def _tool_escalation_reason(calls: Sequence[ToolInvocation]) -> str | None:
+    """Motivo da escalada quando o proprio modelo chamou `escalate_to_human` (RF-26).
+
+    Sem isto, o turno so escala por disjuntor, teto de iteracoes ou segunda falha do
+    guardrail de saida — nunca porque o modelo decidiu que precisava de um humano. O
+    prefixo `tool:` distingue esta origem das demais para `app.agent.handoff` decidir
+    `triggered_by` sem precisar reabrir o resultado da tool.
+    """
+    for call in calls:
+        if call.ok and call.name == "escalate_to_human":
+            reason = call.result.get("reason") if isinstance(call.result, Mapping) else None
+            return f"tool:{reason}" if reason else "tool:escalate_to_human"
+    return None
 
 
 def _strip_context_args(arguments: Mapping[str, Any], tool_name: str) -> dict[str, Any]:

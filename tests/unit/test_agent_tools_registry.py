@@ -11,11 +11,11 @@ from app.agent.tools.registry import build_registry
 from app.knowledge.embeddings import HashingEmbeddingProvider
 
 
-def test_sem_embeddings_so_list_services_entra() -> None:
+def test_sem_embeddings_so_list_services_e_escalate_entram() -> None:
     registry = build_registry(embeddings=None)
-    assert registry.names() == ("list_services",)
+    assert registry.names() == ("list_services", "escalate_to_human")
 
 
 def test_com_embeddings_search_knowledge_tambem_entra() -> None:
     registry = build_registry(embeddings=HashingEmbeddingProvider())
-    assert set(registry.names()) == {"list_services", "search_knowledge"}
+    assert set(registry.names()) == {"list_services", "search_knowledge", "escalate_to_human"}
