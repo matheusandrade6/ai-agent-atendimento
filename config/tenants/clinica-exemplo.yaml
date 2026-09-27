@@ -4,6 +4,10 @@
 identity:
   name: "Clinica Veterinaria Bicho Feliz"
   vertical: veterinaria
+  # Dados da unidade. Sao eles que preenchem {address} e {phone} nos textos abaixo —
+  # sem isso a mensagem de emergencia sai com a chave literal (docs/DECISOES.md, D-38).
+  address: "Rua dos Pinheiros, 1234 - Pinheiros, Sao Paulo - SP"
+  phone: "(11) 3333-4444"
   about: >
     Clinica veterinaria de bairro em Pinheiros, Sao Paulo. Atende caes e gatos.
     Consultas, vacinas, castracao e exames laboratoriais. Nao atende silvestres.

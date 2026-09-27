@@ -13,6 +13,7 @@ from app.domain.tenant_config import (
     TenantConfigError,
     load_all,
     load_tenant_config,
+    missing_unit_fields,
 )
 
 TENANTS_DIR = Path(__file__).resolve().parents[2] / "config" / "tenants"
@@ -165,6 +166,90 @@ def test_yaml_invalido_traz_o_caminho_do_arquivo(tmp_path: Path) -> None:
     bad.write_text("identity: [\n", encoding="utf-8")
     with pytest.raises(TenantConfigError, match=r"quebrado\.yaml"):
         load_tenant_config(bad)
+
+
+# ------------------- placeholders e campos de unidade (DEF-01) -------------------
+
+
+def test_exemplo_tem_os_campos_de_unidade_que_os_textos_citam() -> None:
+    """O `reply` da emergencia cita `{address}` e `{phone}`; sem os campos, sai literal."""
+    config = load_tenant_config(EXAMPLE)
+    valores = config.template_values()
+    assert valores["address"] == config.identity.address
+    assert valores["phone"] == config.identity.phone
+    assert missing_unit_fields(config) == {}
+
+
+def test_campo_vazio_fica_fora_do_mapa_em_vez_de_virar_string_vazia() -> None:
+    """Placeholder sem valor tem a frase descartada; com valor vazio ele viraria
+    "va direto a clinica: .", que promete um dado que nao veio."""
+    data = _base_config()
+    data["identity"]["address"] = ""
+    config = TenantConfig.model_validate(data)
+    assert "address" not in config.template_values()
+
+
+def test_placeholder_desconhecido_em_mensagem_falha() -> None:
+    data = _base_config()
+    data["messages"]["out_of_scope"] = "Ligue para {telefone_da_clinica}."
+    with pytest.raises(Exception, match="telefone_da_clinica"):
+        TenantConfig.model_validate(data)
+
+
+def test_placeholder_desconhecido_em_reply_de_gatilho_falha() -> None:
+    """Falha no onboarding, e nao na primeira emergencia."""
+    data = _base_config()
+    data["escalation"]["triggers"][0]["reply"] = "Va ate {endereco} agora."
+    with pytest.raises(Exception, match="endereco"):
+        TenantConfig.model_validate(data)
+
+
+def test_campo_de_unidade_citado_sem_estar_preenchido_falha_na_leitura(tmp_path: Path) -> None:
+    """Dois campos, dois textos: o erro aponta onde cada um foi citado."""
+    data = _base_config()
+    data["identity"]["address"] = ""
+    data["identity"]["phone"] = ""
+    arquivo = tmp_path / "sem-unidade.yaml"
+    arquivo.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+
+    with pytest.raises(TenantConfigError, match="address"):
+        load_tenant_config(arquivo)
+    assert set(missing_unit_fields(TenantConfig.model_validate(data))) == {"address", "phone"}
+
+
+def test_config_de_producao_nao_cala_o_tenant_por_campo_de_unidade_vazio() -> None:
+    """`resolved()` roda em cada turno (`app.domain.tenant_registry`).
+
+    Se a falta do campo virasse erro de validacao ali, um `${VAR}` ausente no ambiente
+    calaria **todas** as conversas do tenant — pior do que o defeito que isto corrige.
+    Neste caminho quem cobre o buraco e a rede de seguranca da mensagem.
+    """
+    data = _base_config()
+    data["identity"]["address"] = ""
+    config = TenantConfig.model_validate(data).resolved({})
+    assert "address" not in config.template_values()
+
+
+def test_endereco_pela_metade_e_erro() -> None:
+    data = _base_config()
+    data["identity"]["address"] = "Rua A"
+    with pytest.raises(Exception, match="address"):
+        TenantConfig.model_validate(data)
+
+
+def test_telefone_sem_digitos_suficientes_e_erro() -> None:
+    data = _base_config()
+    data["identity"]["phone"] = "3333"
+    with pytest.raises(Exception, match="phone"):
+        TenantConfig.model_validate(data)
+
+
+def test_campo_de_unidade_nao_pode_conter_placeholder() -> None:
+    """Endereco que cita `{address}` sairia para o cliente como endereco de verdade."""
+    data = _base_config()
+    data["identity"]["address"] = "{address} - Sao Paulo"
+    with pytest.raises(Exception, match="address"):
+        TenantConfig.model_validate(data)
 
 
 # ---------------------- deltas verticais (secao 22.2) ----------------------

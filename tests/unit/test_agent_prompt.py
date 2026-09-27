@@ -84,6 +84,32 @@ def test_identidade_declara_que_e_ia_quando_a_config_exige(config: TenantConfig)
     assert "Nunca finja ser uma pessoa" not in block_identity(humana, "web")
 
 
+def test_identidade_traz_endereco_e_telefone_da_unidade(config: TenantConfig) -> None:
+    """Pergunta banal — sem estes dados no prompt o agente inventa ou escala."""
+    bloco = block_identity(config, "whatsapp")
+    assert config.identity.address in bloco
+    assert config.identity.phone in bloco
+    assert "nada alem deles" in bloco
+
+
+def test_identidade_omite_o_que_a_config_nao_tem(config: TenantConfig) -> None:
+    """Campo vazio nao vira linha: o que nao esta escrito cai em "nunca invente dados"."""
+    sem_unidade = config.model_copy(
+        update={"identity": config.identity.model_copy(update={"address": "", "phone": ""})}
+    )
+    bloco = block_identity(sem_unidade, "whatsapp")
+    assert "Endereco da unidade" not in bloco
+    assert "Telefone da unidade" not in bloco
+    assert bloco.startswith("[IDENTIDADE]")
+
+    so_telefone = config.model_copy(
+        update={"identity": config.identity.model_copy(update={"address": ""})}
+    )
+    bloco = block_identity(so_telefone, "whatsapp")
+    assert "Endereco da unidade" not in bloco
+    assert config.identity.phone in bloco
+
+
 # --------------------------------- [PAPEL] ---------------------------------
 
 

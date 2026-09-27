@@ -8,8 +8,12 @@
 #   schema (para todos os tenants) ou nao e feita.
 
 identity:
-  name: "" # razao social ou nome fantasia usado nas mensagens
+  name: "" # razao social ou nome fantasia usado nas mensagens; preenche {unit_name}
   vertical: "" # veterinaria | medica | odontologica | estetica | terapias | ...
+  # Dados da unidade. Preenchem {address} e {phone} em qualquer texto deste arquivo, e
+  # sao OBRIGATORIOS se algum texto citar esses campos — a validacao recusa o arquivo.
+  address: "" # endereco completo, do jeito que a pessoa precisa ler para chegar
+  phone: "" # telefone para ligar, no formato que o cliente le
   about: >
     Duas ou tres frases sobre o negocio: o que faz, onde fica, o que NAO atende.
     Este texto vai para o system prompt.
@@ -76,9 +80,14 @@ escalation:
   handoff_silence_minutes: 120
 
 messages:
+  # Os textos podem citar {unit_name}, {address}, {phone}, {agent_name} e {contact_name};
+  # a confirmacao tambem cita os campos do agendamento ({service}, {date_human}, {time},
+  # {provider}, {subject_name}, {price_line}, {prep_line}). Nome fora dessa lista e erro
+  # de validacao: nada no sistema saberia preencher.
   greeting_new: ""
   greeting_returning: ""
   out_of_scope: ""
+  handoff_notice: "" # vazio = aviso padrao do sistema quando um gatilho escala sem reply
   confirmation: ""
 
 limits:

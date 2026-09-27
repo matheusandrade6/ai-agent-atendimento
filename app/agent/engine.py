@@ -349,6 +349,7 @@ class AgentEngine:
             tenant_id=request.tenant_id,
             contact_id=request.contact_id,
             signals=_trigger_signals(request),
+            placeholders=_placeholders(request),
         )
         if not decision.short_circuits:
             return None
@@ -710,6 +711,24 @@ def _trigger_signals(request: TurnRequest) -> dict[str, Any]:
         "collected_count": len(state.collected),
         "cost_usd": float(state.cost_so_far_usd),
     }
+
+
+def _placeholders(request: TurnRequest) -> dict[str, str]:
+    """Valores para os `{campo}` dos textos configurados do tenant (DEF-01).
+
+    A config entra com os dados da unidade (`{address}`, `{phone}`, `{unit_name}`,
+    `{agent_name}`) e o turno acrescenta o que so ele sabe — hoje, o nome do contato.
+    Campo vazio fica de fora: placeholder sem valor nao sai literal para o cliente, a rede
+    de seguranca de `split_message` remove a frase que o cita.
+
+    A confirmacao de agendamento (S15/S16) usa o mesmo mapa, completado com os campos do
+    agendamento (`app.domain.templates.APPOINTMENT_PLACEHOLDERS`).
+    """
+    values = request.config.template_values()
+    contact_name = (request.person.contact_name or "").strip()
+    if contact_name:
+        values["contact_name"] = contact_name
+    return values
 
 
 def _tool_escalation_reason(calls: Sequence[ToolInvocation]) -> str | None:

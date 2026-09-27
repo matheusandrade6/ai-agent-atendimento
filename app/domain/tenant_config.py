@@ -22,6 +22,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.domain.conditions import ConditionError, parse_condition
+from app.domain.templates import UNIT_PLACEHOLDERS, placeholders_in, unknown_placeholders
 
 Weekday = Literal["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 WEEKDAYS: tuple[Weekday, ...] = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
@@ -39,9 +40,48 @@ class _Strict(BaseModel):
 
 
 class Identity(_Strict):
+    """Quem e o negocio, e os dados da unidade que as mensagens citam.
+
+    `address` e `phone` existem porque texto configurado fala deles: o `reply` do gatilho
+    de emergencia manda a pessoa ir ate a clinica, e `messages.confirmation` repete o
+    endereco. Antes destes campos nao havia de onde tirar o valor e a mensagem saia com
+    `{address}` literal (DEF-01). Sao genericos de proposito — nome, endereco e telefone
+    da unidade que atende, em qualquer vertical.
+
+    Multi-unidade (`resources`, S12) e outro assunto: quando existir, o endereco por
+    recurso entra no mapa de placeholders do turno e cobre este, sem mudar quem cita.
+    """
+
     name: str
     vertical: str
     about: str = ""
+    #: Endereco completo da unidade, do jeito que a pessoa precisa ler para chegar la.
+    address: str = ""
+    #: Telefone para ligar, no formato que o cliente le. Nao e
+    #: `channels.whatsapp.phone_number_id`, que e id de conta e nao serve para ligar.
+    phone: str = ""
+
+    @model_validator(mode="after")
+    def _unit_fields_are_usable(self) -> Self:
+        """Campo de unidade preenchido pela metade e pior do que vazio.
+
+        Vazio o texto que o cita e descartado (`app.domain.templates.drop_unresolved`);
+        preenchido com `x` ou com outro placeholder, ele vai para o cliente como se fosse
+        endereco de verdade.
+        """
+        address = self.address.strip()
+        if address and (len(address) < 10 or placeholders_in(address)):
+            raise ValueError(
+                f"identity.address: endereco incompleto ({self.address!r}) — escreva o "
+                f"endereco por extenso, sem placeholder"
+            )
+        phone = self.phone.strip()
+        if phone and (len(re.sub(r"\D", "", phone)) < 8 or placeholders_in(phone)):
+            raise ValueError(
+                f"identity.phone: telefone invalido ({self.phone!r}) — precisa de pelo "
+                f"menos 8 digitos e nenhum placeholder"
+            )
+        return self
 
 
 class Vocabulary(_Strict):
@@ -286,12 +326,29 @@ class EscalationConfig(_Strict):
 
 
 class MessageTemplates(_Strict):
+    """Textos do tenant. Podem citar os placeholders de `app.domain.templates`.
+
+    `handoff_notice` e o aviso que o cliente recebe quando um gatilho escala sem `reply`
+    proprio. Vazio, entra o aviso padrao do sistema
+    (`app.agent.guardrails.DEFAULT_HANDOFF_NOTICE`): escalar calado nunca e aceitavel, e
+    essa garantia nao pode depender de o onboarding ter lembrado (DEF-02).
+    """
+
     model_config = ConfigDict(extra="allow")  # tenant pode acrescentar mensagens proprias
 
     greeting_new: str = ""
     greeting_returning: str = ""
     out_of_scope: str = ""
+    handoff_notice: str = ""
     confirmation: str = ""
+
+    def texts(self) -> dict[str, str]:
+        """Todo texto configurado aqui, inclusive as mensagens que o tenant acrescentou."""
+        return {
+            name: value
+            for name, value in self.model_dump().items()
+            if isinstance(value, str) and value.strip()
+        }
 
 
 class Limits(_Strict):
@@ -375,6 +432,56 @@ class TenantConfig(_Strict):
                 )
         return self
 
+    @model_validator(mode="after")
+    def _templates_cite_known_placeholders(self) -> Self:
+        """Texto so pode citar `{campo}` que algum ponto do sistema sabe preencher.
+
+        Estatica de proposito: confere o **nome**, nao o valor. Um `{endereco}` escrito em
+        portugues nunca teria quem o preenchesse, e descobrir isso no onboarding e de graca
+        perto de descobrir na primeira emergencia (DEF-01). Nome novo em template exige
+        codigo que o preencha — a lista mora em `app.domain.templates`.
+        """
+        for label, text in self.template_texts().items():
+            unknown = unknown_placeholders(text)
+            if unknown:
+                raise ValueError(
+                    f"{label}: placeholder desconhecido ({', '.join(unknown)}) — "
+                    f"nada no sistema preenche esse nome; os validos estao em "
+                    f"app.domain.templates.KNOWN_PLACEHOLDERS"
+                )
+        return self
+
+    def template_texts(self) -> dict[str, str]:
+        """Todo texto configurado que pode citar placeholder, indexado por onde ele esta."""
+        texts = {f"messages.{name}": value for name, value in self.messages.texts().items()}
+        for trigger in self.escalation.triggers:
+            if trigger.reply.strip():
+                texts[f"escalation.triggers[{trigger.id}].reply"] = trigger.reply
+        if self.channels.web.greeting.strip():
+            texts["channels.web.greeting"] = self.channels.web.greeting
+        if self.persona.signature and self.persona.signature.strip():
+            texts["persona.signature"] = self.persona.signature
+        return texts
+
+    def template_values(self) -> dict[str, str]:
+        """Os placeholders que a config sabe preencher (`{address}`, `{phone}`, ...).
+
+        E daqui que sai o `placeholders` do guardrail de entrada, e e daqui que a
+        confirmacao de agendamento (S15/S16) vai tirar a parte dela que nao depende do
+        turno — o mesmo mapa, completado com os campos do agendamento.
+
+        Campo vazio fica **fora** do mapa, em vez de virar string vazia: assim o
+        placeholder continua sem resolver e a rede de seguranca descarta a frase inteira,
+        em vez de entregar "va direto a clinica: ." ao cliente.
+        """
+        values = {
+            "unit_name": self.identity.name,
+            "address": self.identity.address,
+            "phone": self.identity.phone,
+            "agent_name": self.persona.agent_name,
+        }
+        return {name: value.strip() for name, value in values.items() if value.strip()}
+
     def resolved(self, env: dict[str, str] | None = None) -> TenantConfig:
         """Devolve uma copia com os `${VAR}` substituidos pelo ambiente.
 
@@ -411,9 +518,42 @@ def load_tenant_config(path: str | Path) -> TenantConfig:
         raise TenantConfigError(f"{file_path}: YAML invalido — {exc}") from exc
 
     try:
-        return TenantConfig.model_validate(data)
+        config = TenantConfig.model_validate(data)
     except Exception as exc:
         raise TenantConfigError(f"{file_path}: {exc}") from exc
+
+    missing = missing_unit_fields(config)
+    if missing:
+        detail = "; ".join(
+            f"`{{{name}}}` citado em {', '.join(where)}" for name, where in missing.items()
+        )
+        raise TenantConfigError(
+            f"{file_path}: campo de unidade nao preenchido em identity — {detail}"
+        )
+    return config
+
+
+def missing_unit_fields(config: TenantConfig) -> dict[str, tuple[str, ...]]:
+    """Placeholder de unidade citado em texto sem o campo de `identity` preenchido.
+
+    Devolve `{placeholder: (onde foi citado, ...)}` — vazio quando esta tudo no lugar.
+
+    **Por que so `load_tenant_config` levanta.** Aqui o arquivo esta em git e passa pelo
+    CI e pelo `--validate` do onboarding: falhar e de graca e o modo de falha e visivel.
+    No caminho de producao, a config vem de `tenants.config` e passa por `resolved()`, que
+    revalida com o ambiente aplicado — um `${VAR}` ausente transformaria este erro em
+    "config invalida" e calaria **todas** as conversas do tenant
+    (`app.domain.tenant_registry`). Silenciar o tenant inteiro e pior do que o defeito que
+    esta sendo corrigido, e ali o buraco ja esta tapado pela rede de seguranca
+    (`app.domain.templates.drop_unresolved`), que remove a frase sem valor.
+    """
+    cited: dict[str, list[str]] = {}
+    available = config.template_values()
+    for label, text in config.template_texts().items():
+        for name in placeholders_in(text):
+            if name in UNIT_PLACEHOLDERS and name not in available:
+                cited.setdefault(name, []).append(label)
+    return {name: tuple(where) for name, where in cited.items()}
 
 
 def load_all(directory: str | Path) -> dict[str, TenantConfig]:

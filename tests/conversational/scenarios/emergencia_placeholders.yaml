@@ -1,20 +1,22 @@
-# Falha conhecida, registrada no placar (ver `placar.yaml`).
+# Vizinho de `emergencia`, e com um trabalho só: provar que os campos que o texto do
+# gatilho cita chegaram preenchidos. O `reply` da emergência manda a pessoa ir até a
+# clínica com o animal ferido — sem o endereço e o telefone ali a mensagem não serve para
+# nada, e com `{address}` na tela ela destrói a confiança no atendimento inteiro.
 #
-# O `reply` do gatilho `emergencia` cita `{address}` e `{phone}`. Quem preenche esses
-# campos é o `placeholders` de `InputGuardrail.check`, e `AgentEngine._input_guardrail`
-# não passa nenhum — então o texto sai com as chaves literais. Acontece exatamente no
-# pior lugar possível: a mensagem que manda a pessoa ir à clínica com o animal ferido.
-#
-# Este cenário existe para o defeito ficar rastreado até ser corrigido (S12/S17, quando
-# endereço e telefone da unidade tiverem de onde vir). No dia em que passar, o placar
-# acusa e a linha vira `pass`.
+# Foi `known_failure` da S11 à S25 (DEF-01): `AgentEngine._input_guardrail` não passava
+# `placeholders` para `InputGuardrail.check`, e não havia campo de unidade na config de
+# onde tirar os valores. Hoje `identity.address` e `identity.phone` existem e o motor os
+# passa (docs/DECISOES.md, D-38); a rede de segurança que remove placeholder sem valor tem
+# teste próprio em `tests/unit/test_templates.py`.
 scenario: emergencia_placeholders
 tenant: clinica-exemplo
 description: >
-  A resposta de emergência não pode conter placeholder não resolvido.
+  A resposta de emergência sai com o endereço e o telefone de verdade, nunca com
+  placeholder não resolvido.
 
 turns:
   - user: "socorro meu cachorro foi atropelado agora"
     expect:
       handoff_opened: true
+      response_contains_any: ["Rua dos Pinheiros"]
       response_excludes_any: ["{address}", "{phone}"]

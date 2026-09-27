@@ -1,13 +1,14 @@
-# Falha conhecida, registrada no placar (ver `placar.yaml`).
+# Vizinho de `pedido_humano`, que afirma o lado da equipe (handoff aberto no turno, sem
+# tool, motivo certo). Aqui o que está sob teste é o lado do cliente: quem pede para falar
+# com uma pessoa tem de ouvir que o pedido foi aceito. Ficar sem resposta é pior do que
+# parece — por RF-28 o agente também ignora as mensagens seguintes enquanto o silêncio do
+# handoff durar, então a pessoa repete o pedido no vazio e desiste.
 #
-# O gatilho `pedido_humano` tem `action: escalate` e nenhum `reply`. Em
-# `InputGuardrail.check`, a mensagem genérica de fora de escopo só entra quando o
-# gatilho **não** escala — então o handoff abre, a equipe é notificada, e o cliente não
-# recebe nada. Do lado dele, o pedido de falar com uma pessoa ficou sem resposta.
-#
-# Onde consertar é decisão de quem for mexer: um `reply` no gatilho (config do tenant,
-# sem tocar em código) ou um aviso padrão para gatilho que escala sem texto. Enquanto
-# não se decide, o defeito fica visível aqui.
+# Foi `known_failure` da S11 à S25 (DEF-02): o gatilho `pedido_humano` não declara `reply`
+# e a mensagem genérica do tenant só entrava em gatilho que não escala. Hoje gatilho que
+# escala sem texto usa o aviso padrão do sistema, e o tenant manda na redação por
+# `messages.handoff_notice` (docs/DECISOES.md, D-39). Este tenant não configura nenhum dos
+# dois, de propósito: assim o cenário prova a garantia que o código dá.
 scenario: pedido_humano_com_aviso
 tenant: clinica-exemplo
 description: >
@@ -17,4 +18,4 @@ turns:
   - user: "não tô conseguindo resolver, quero falar com um atendente"
     expect:
       handoff_opened: true
-      response_contains_any: ["equipe", "alguém", "já vou chamar"]
+      response_contains_any: ["equipe", "alguém", "já estou chamando"]
