@@ -1,0 +1,35 @@
+# Risco de impacto alto da seção 21: horário alucinado.
+# O `check_availability` aqui é um stub do cenário (a tool real chega na S15), com os
+# slots vindo do calendário falso: 14:30 livre, 16:00 ocupado. O modelo é roteirizado
+# para oferecer justamente o horário ocupado; o cliente só pode receber o livre.
+scenario: horario_inventado
+tenant: clinica-exemplo
+description: >
+  Modelo oferece um horário que a agenda não devolveu. A conferência de saída descarta,
+  pede a reescrita e só o slot real é enviado.
+
+now: "2026-09-08T10:00:00"
+calendar_busy: ["+1 16:00"]
+
+tools:
+  - name: check_availability
+    description: "Horarios livres para o servico, no periodo pedido."
+    input_schema:
+      type: object
+      properties:
+        service: { type: string }
+      required: [service]
+    slots: ["+1 14:30", "+1 16:00"]
+
+turns:
+  - user: "tem horário amanhã pra consulta?"
+    agent:
+      - call: check_availability
+        arguments: { service: "consulta" }
+      - say: "Tenho amanhã às 16h, posso reservar?"
+      - say: "Tenho amanhã às 14h30, posso reservar?"
+    expect:
+      tools_called: [check_availability]
+      response_contains_any: ["14h30"]
+      response_excludes_any: ["16h"]
+      handoff_opened: false

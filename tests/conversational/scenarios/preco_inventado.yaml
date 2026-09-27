@@ -1,0 +1,23 @@
+# Risco de impacto alto da seção 21: preço alucinado.
+# Aqui o modelo erra de propósito — cita um valor que não está no catálogo. O cenário
+# prova que a resposta errada não chega ao cliente: o guardrail de saída descarta, pede
+# a reescrita (11.5) e só a segunda resposta é enviada.
+scenario: preco_inventado
+tenant: clinica-exemplo
+description: >
+  Modelo roteirizado para inventar R$ 150. O cliente recebe apenas o valor do catálogo.
+
+services:
+  - name: Consulta clínica
+    duration_minutes: 30
+    price_line: "R$ 180,00"
+
+turns:
+  - user: "quanto fica a consulta?"
+    agent:
+      - say: "A consulta sai por R$ 150,00."
+      - say: "A consulta clínica custa R$ 180,00."
+    expect:
+      response_contains_any: ["180"]
+      response_excludes_any: ["150"]
+      handoff_opened: false

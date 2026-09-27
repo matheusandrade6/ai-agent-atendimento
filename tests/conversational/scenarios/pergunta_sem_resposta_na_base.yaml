@@ -1,0 +1,38 @@
+# Cenário obrigatório da 19.3 — "pergunta sem resposta na base" (fluxo 12.4).
+# A base do cenário não cobre o assunto. O caminho certo é buscar, não achar, e escalar
+# com `escalate_to_human` — nunca preencher o silêncio com um palpite.
+scenario: pergunta_sem_resposta_na_base
+tenant: clinica-exemplo
+description: >
+  Cliente pergunta sobre atendimento a domicílio de madrugada. A busca não traz nada e
+  o agente passa para a equipe, dizendo isso.
+
+knowledge:
+  - title: Espécies atendidas
+    content: "Atendemos cães e gatos. Não atendemos silvestres nem animais de grande porte."
+  - title: Formas de pagamento
+    content: "Aceitamos pix, dinheiro e cartão em até 3 vezes."
+
+turns:
+  - user: "vocês fazem atendimento a domicílio de madrugada?"
+    agent:
+      - call: search_knowledge
+        arguments: { query: "atendimento a domicilio madrugada" }
+      - call: escalate_to_human
+        arguments:
+          category: fora_de_escopo
+          reason: "a base nao cobre atendimento a domicilio fora do horario"
+      - say: >-
+          Essa eu não sei responder com segurança. Já pedi para alguém da equipe
+          te responder por aqui.
+    expect:
+      handoff_opened: true
+      handoff_reason: fora_de_escopo
+      max_turns_to_escalate: 1
+      tools_called: [search_knowledge, escalate_to_human]
+      response_contains_any: ["equipe", "não sei"]
+      response_excludes_any: ["fazemos sim", "atendemos sim", "de madrugada nós"]
+      stage: handoff
+      tone: >
+        Admite que não sabe sem pedir desculpas em excesso e diz o que vai acontecer
+        agora. Não promete prazo nem inventa política.

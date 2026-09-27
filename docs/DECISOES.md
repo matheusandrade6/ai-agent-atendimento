@@ -612,6 +612,92 @@ handoff — RF-27 fica coberto pelo canal que toda config de exemplo já usa.
 
 ---
 
+## D-33 · O modelo da suíte conversacional é roteirizado, não ao vivo · S11
+
+**Contexto.** A 19.4 manda rodar a suíte inteira a cada alteração de prompt e **bloquear
+o merge na queda de qualquer cenário**. Isso exige um placar em que "caiu" signifique
+"alguma coisa quebrou", e não "o modelo respondeu diferente hoje".
+
+**Alternativa descartada.** Rodar os cenários contra a API de verdade e julgar tudo com
+juiz LLM. Cada execução custaria dinheiro, levaria minutos, precisaria de chave no CI e —
+o que mata a ideia — daria resultados diferentes para o mesmo código. Um placar que pisca
+não bloqueia merge: ensina a reexecutar até passar.
+
+**Decisão.** O cenário traz o roteiro do modelo (`agent: [{say|call}]`) e
+`ScriptedModel` o devolve na ordem. O que a suíte mede é o **sistema em volta do
+modelo** — curto-circuito de gatilho, despacho de tool, conferência de saída,
+escalonamento, silêncio de handoff. Tudo isso é código nosso e é determinístico.
+
+**Consequência boa.** Dá para roteirizar o modelo **errando de propósito**, que é o teste
+que a API real não permite fazer de forma confiável: `preco_inventado` e
+`horario_inventado` fazem o modelo citar valor e horário que não vieram de ferramenta
+nenhuma, e provam que a conferência da 11.5 descarta a resposta antes de o cliente vê-la.
+
+**O que fica de fora.** A qualidade da decisão do modelo (quando chamar tool, o que
+perguntar) não é medida offline. Para isso existe `CONVERSATIONAL_LIVE=1`, que troca o
+roteiro pelo `AnthropicProvider` — e não entra no placar.
+
+---
+
+## D-34 · O placar versiona o número de asserções, não só o status · S11
+
+**Contexto.** "Queda em qualquer cenário bloqueia o merge" (19.4) protege contra o
+cenário ficar vermelho. Não protege contra o caminho mais fácil de ficar verde: apagar a
+asserção que incomoda. O cenário continua listado, continua passando, e não confere mais
+nada.
+
+**Decisão.** `tests/conversational/placar.yaml` guarda, por cenário, `status` **e**
+`assercoes`. `test_placar.py` exige igualdade: menos asserções do que o registrado é
+enfraquecimento e falha; mais pede atualização do placar. Somado às outras conferências
+(cenário fora do placar, linha sem cenário, queda de cenário aprovado), o conjunto fecha
+as maneiras de conseguir verde sem ter conferido.
+
+**`known_failure` com motivo obrigatório.** Defeito conhecido fica rastreado em vez de
+apagado, e **tem** de continuar falhando: quando passar, a suíte manda promover a linha.
+Dois estão registrados hoje, ambos encontrados pela própria suíte (placeholder `{address}`
+não resolvido na mensagem de emergência; pedido de humano que escala sem responder nada
+ao cliente).
+
+---
+
+## D-35 · A suíte conversacional não toca banco nem rede · S11
+
+**Contexto.** O critério de aceite da S11 é `pytest tests/conversational` rodando
+offline. As tools de leitura de verdade (`list_services`, `search_knowledge`) consultam
+Postgres; `HandoffService` grava em `handoffs`; o canal de saída fala com a Graph API.
+
+**Decisão.** O runner monta o registro de tools com o **schema de produção e o handler
+trocado** (`dataclasses.replace(spec, handler=...)`): nome, descrição e `input_schema`
+continuam vindo da tool real — que é o que o modelo lê para decidir —, e os dados vêm do
+YAML do cenário. Handoff e canal viram `InMemoryHandoffs` e `FakeChannel`, que guardam só
+o que muda o turno seguinte (um handoff aberto por vez, silêncio até `silenced_until`).
+A persistência de verdade já tem teste contra banco real em `tests/integration/`.
+
+**Amarrado por teste.** `test_nenhum_cenario_toca_o_banco` troca `tenant_session` e
+`search_knowledge` por funções que levantam, e roda todos os cenários. No dia em que
+alguém registrar no runner uma tool que ainda consulta o banco, esse teste cai.
+
+---
+
+## D-36 · Cenário declara `now` congelado e slots relativos · S11
+
+**Contexto.** Os guardrails de saída interpretam data e hora em relação a *hoje*
+(`find_mentions(text, today=...)`), e as janelas de `business_hours` variam por dia da
+semana. Um cenário com data absoluta (`2026-09-09`) começa a testar o passado assim que o
+dia chega — e passa a falhar por motivo que não é o dele.
+
+**Decisão.** O relógio do cenário é congelado (padrão: terça, 08/09/2026, 10h em São
+Paulo, dia útil dentro do horário de funcionamento do tenant de exemplo) e todo slot é
+escrito relativo (`+1 14:30`, `hoje 16:00`), resolvido pelo `FakeCalendar` contra esse
+instante. Nenhum cenário chama `now()`.
+
+**Tool que ainda não existe entra como stub do cenário.** `check_availability` e
+`confirm_appointment` são citadas pela 19.3 mas só ganham implementação na S13/S15.
+Declarar o schema delas no YAML (e não em Python) evita fixar agora uma interface que
+ainda não foi desenhada; quando existirem, o cenário troca o stub pela tool de verdade.
+
+---
+
 ## Pendências de verificação
 
 Todas fechadas. Estado verificado ao fim da Fase 0, contra Postgres 16 real:
@@ -663,3 +749,28 @@ Estado ao fim da S10, contra Postgres 16 e Redis reais:
 | Total: 446 testes, nenhum pulado | ✅ verde |
 | `ruff check` + `ruff format --check` | ✅ limpo |
 | `mypy --strict` | ✅ limpo (52 arquivos) |
+
+
+---
+
+Estado ao fim da S11, contra Postgres 16 e Redis reais:
+
+| Item | Estado |
+|---|---|
+| Runner da suíte conversacional (19.3) | ✅ 11 cenários, 44 testes novos |
+| Placar versionado (19.4) | ✅ 9 cenários `pass`, 2 `known_failure` com motivo |
+| `pytest tests/conversational` sem Postgres, Redis ou chave de API | ✅ verde, determinístico |
+| Total: 490 testes (2 pulados: os `known_failure`) | ✅ verde |
+| `ruff check` + `ruff format --check` | ✅ limpo |
+| `mypy --strict` | ✅ limpo (52 arquivos de `app`, mais 9 da suíte) |
+
+Dois defeitos encontrados pela própria suíte e registrados no placar, não corrigidos
+nesta sessão (fora do escopo da S11):
+
+1. **`emergencia_placeholders`** — a resposta de emergência sai com `{address}` e
+   `{phone}` literais. `AgentEngine._input_guardrail` não passa `placeholders` para
+   `InputGuardrail.check`. Acontece na mensagem que manda a pessoa ir à clínica com o
+   animal ferido.
+2. **`pedido_humano_com_aviso`** — quem pede para falar com uma pessoa não recebe resposta
+   nenhuma: o gatilho `pedido_humano` escala sem `reply`, e a mensagem genérica só entra
+   em gatilho que não escala. O handoff abre e a equipe é avisada; o cliente fica no vácuo.
