@@ -242,7 +242,11 @@ class HandoffService:
                 return HandoffOpened(handoff_id=existing.id, opened=False, notified=False)
 
             silenced_until = now + timedelta(minutes=config.escalation.handoff_silence_minutes)
-            handoff_id = (
+            # A anotacao nao e enfeite: no SQLAlchemy 2.1 o `scalar_one()` de um
+            # `TextClause` devolve um type var que o mypy nao consegue resolver, e
+            # `mypy --strict` para em "Need type annotation". Com 2.0 passava — foi assim
+            # que isto chegou verde na S10 e vermelho no CI, que instala a versao nova.
+            handoff_id: uuid.UUID = (
                 await session.execute(
                     sa.text(
                         "INSERT INTO handoffs (tenant_id, conversation_id, reason,"
