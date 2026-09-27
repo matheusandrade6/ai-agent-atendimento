@@ -698,6 +698,32 @@ ainda não foi desenhada; quando existirem, o cenário troca o stub pela tool de
 
 ---
 
+## D-37 · A URL sincrona nomeia o driver; o default do SQLAlchemy nao serve · S11
+
+**Contexto.** `Settings.sync_database_url` era a URL async com o sufixo `+asyncpg`
+removido, o que produzia `postgresql://...`. Quem consome isso e o Alembic (migrations,
+inclusive no deploy) e os testes de integracao.
+
+**O que aconteceu.** `pyproject.toml` pede `sqlalchemy[asyncio]>=2.0.36` sem teto. O CI
+instala do zero e recebeu **2.1.1**; o venv local esta em **2.0.52**. No 2.1 o driver
+default de `postgresql://` mudou de `psycopg2` para `psycopg` (v3) — e a dependencia
+declarada e `psycopg2-binary`. Resultado: `alembic upgrade head` morreu com
+`ModuleNotFoundError: No module named 'psycopg'` no CI. O mesmo comando roda no deploy.
+
+**Decisao.** A URL sincrona passa a nomear o driver por extenso
+(`postgresql+psycopg2://`), trocando o esquema inteiro em vez de remover o sufixo — isso
+cobre tambem a URL que chega do ambiente sem driver nenhum, que e o caso comum em deploy.
+`test_url_sincrona_nomeia_o_driver` fixa as duas formas de entrada.
+
+**Por que nao pinar o SQLAlchemy em vez disso.** Pinar resolveria este sintoma e esconderia
+a causa: a URL continuaria dependendo de um default. Nomear o driver e correto em qualquer
+versao. **A divergencia de versao entre CI e ambiente local continua aberta** — ela e
+politica de dependencia (teto nas versoes ou lock file), nao conserto de CI, e merece
+decisao propria. Este episodio e o argumento a favor: o primeiro sintoma foi uma anotacao
+de tipo faltando, o segundo foi o deploy quebrado.
+
+---
+
 ## Pendências de verificação
 
 Todas fechadas. Estado verificado ao fim da Fase 0, contra Postgres 16 real:

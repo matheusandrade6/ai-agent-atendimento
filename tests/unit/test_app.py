@@ -41,3 +41,24 @@ def test_producao_exige_chave_do_llm() -> None:
     )
     with pytest.raises(RuntimeError, match="anthropic_api_key"):
         create_app(settings)
+
+
+@pytest.mark.parametrize(
+    "entrada",
+    [
+        "postgresql+asyncpg://u:p@h:5432/d",
+        # Como a URL chega do ambiente na maioria dos deploys: sem driver.
+        "postgresql://u:p@h:5432/d",
+    ],
+)
+def test_url_sincrona_nomeia_o_driver(entrada: str) -> None:
+    """O driver sincrono nao pode depender do default do SQLAlchemy.
+
+    Ele mudou de psycopg2 para psycopg (v3) no 2.1, e a dependencia declarada e
+    `psycopg2-binary` — sem o driver escrito na URL, `alembic upgrade head` morre com
+    `ModuleNotFoundError` no primeiro ambiente que instalar a versao nova.
+    """
+    settings = Settings(environment="test", database_url=entrada, database_admin_url=entrada)
+
+    assert settings.sync_database_url == "postgresql+psycopg2://u:p@h:5432/d"
+    assert settings.sync_admin_database_url == "postgresql+psycopg2://u:p@h:5432/d"
