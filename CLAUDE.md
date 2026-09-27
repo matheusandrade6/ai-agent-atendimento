@@ -9,6 +9,8 @@ marcada (clínicas, salões, terapeutas). Canal principal WhatsApp; agenda no Go
 - `docs/spec/` — a spec fatiada por seção. **Leia só o que a sua sessão indicar.**
 - `docs/SPEC.md` — a spec inteira (71 KB). Não leia inteira; use as fatias.
 - `docs/DECISOES.md` — decisões tomadas durante a implementação que divergem ou detalham a spec.
+- `docs/DEFEITOS.md` — defeitos encontrados e ainda não corrigidos, cada um com o cenário
+  que o reproduz. Leia antes de mexer em guardrails, handoff ou mensagens de template.
 
 ## Regra de ouro
 
@@ -51,6 +53,7 @@ No Windows (PowerShell) — `make` normalmente nao existe; use o script:
 .\tasks.ps1 install   # cria o venv e instala dependencias
 .\tasks.ps1 migrate
 .\tasks.ps1 test
+.\tasks.ps1 conv      # so a suite conversacional (19.4): sem docker, sem chave de API
 .\tasks.ps1 lint      # ruff check + ruff format --check + mypy
 .\tasks.ps1 check     # migrate + test + lint, para fechar uma sessao
 ```

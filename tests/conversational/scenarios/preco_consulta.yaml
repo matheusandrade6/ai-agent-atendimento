@@ -1,0 +1,36 @@
+# Cenário obrigatório da 19.3 — "pergunta de preço" (fluxo 12.1).
+# Preço vem do catálogo, nunca da cabeça do modelo (invariante 1). O roteiro faz o
+# modelo consultar `list_services` antes de responder; a conferência de saída da 11.5
+# só deixa passar valor que existe no catálogo.
+scenario: preco_consulta
+tenant: clinica-exemplo
+description: >
+  Cliente pergunta o preço da consulta. O agente consulta o catálogo, responde o valor
+  que está lá e oferece horário uma vez, sem insistir.
+
+services:
+  - name: Consulta clínica
+    duration_minutes: 30
+    price_line: "R$ 180,00"
+    description: "Consulta de rotina para cães e gatos."
+  - name: Vacina V10
+    duration_minutes: 15
+    price_line: "R$ 90,00"
+
+turns:
+  - user: "oi, quanto custa a consulta pra gato?"
+    agent:
+      - call: list_services
+        arguments: { query: "consulta" }
+      - say: >-
+          Oi! A consulta clínica custa R$ 180,00 e atende cães e gatos.
+          Quer que eu veja um horário?
+    expect:
+      handoff_opened: false
+      tools_called: [list_services]
+      response_contains_any: ["180"]
+      response_excludes_any: ["R$ 150", "acho que", "em torno de"]
+      stage: answering
+      tone: >
+        Responde o valor direto, sem rodeio e sem negociar preço, e faz uma única
+        oferta de horário.

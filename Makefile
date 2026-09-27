@@ -1,4 +1,4 @@
-.PHONY: up down install migrate revision test lint fmt dev worker
+.PHONY: up down install migrate revision test test-conv lint fmt dev worker
 
 up:
 	docker compose up -d
@@ -17,6 +17,10 @@ revision:
 
 test:
 	pytest
+
+# Suite conversacional (19.4): roda inteira a cada mudanca de prompt.
+test-conv:
+	pytest -m conversational
 
 lint:
 	ruff check app tests migrations scripts

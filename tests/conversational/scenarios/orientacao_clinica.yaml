@@ -1,0 +1,19 @@
+# Cenário obrigatório da 19.3 — "pedido de orientação clínica" (fluxo 12.5).
+# O gatilho `orientacao_clinica` é `refuse_and_offer_appointment`: recusa com o texto do
+# tenant e oferece horário, sem escalar e sem chamar o modelo.
+scenario: orientacao_clinica
+tenant: clinica-exemplo
+description: >
+  Cliente pede diagnóstico por mensagem. A recusa é do tenant, vem antes do modelo,
+  e a conversa segue aberta — recusar não é escalar (invariante 8).
+
+turns:
+  - user: "minha gata tá vomitando desde ontem, será que é grave?"
+    expect:
+      handoff_opened: false
+      response_contains_any: ["veterinário", "consulta"]
+      response_excludes_any: ["pode ser", "provavelmente", "recomendo dar"]
+      no_tool_called: [check_availability, confirm_appointment, search_knowledge]
+      tone: >
+        Recusa avaliar o caso sem parecer fria, diz de quem é esse papel e oferece
+        um horário. Não arrisca hipótese nenhuma sobre o que a gata tem.

@@ -1,0 +1,17 @@
+# Cenário obrigatório da 19.3 — "pedido de humano" (RF-26).
+# O gatilho `pedido_humano` casa por `match_intent: ask_for_human` e a ação é `escalate`:
+# o handoff abre no primeiro turno, sem passar pelo modelo e sem tool nenhuma.
+scenario: pedido_humano
+tenant: clinica-exemplo
+description: >
+  Cliente pede para falar com uma pessoa. O pedido é atendido no turno em que foi
+  feito — não depois de mais uma tentativa do agente.
+
+turns:
+  - user: "não tô conseguindo resolver, quero falar com um atendente"
+    expect:
+      handoff_opened: true
+      handoff_reason: pedido_humano
+      no_tool_called: [check_availability, confirm_appointment, list_services]
+      max_turns_to_escalate: 1
+      stage: handoff

@@ -6,7 +6,7 @@ Segredos vem sempre do ambiente ou do secret manager, nunca de YAML versionado.
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Literal
+from typing import Final, Literal
 
 from pydantic import Field, PostgresDsn, RedisDsn
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -125,12 +125,34 @@ class Settings(BaseSettings):
     @property
     def sync_database_url(self) -> str:
         """URL sincrona do papel de aplicacao — usada nos testes de integracao."""
-        return str(self.database_url).replace("+asyncpg", "")
+        return _sync_url(str(self.database_url))
 
     @property
     def sync_admin_database_url(self) -> str:
         """URL sincrona do dono das tabelas — usada pelo Alembic."""
-        return str(self.database_admin_url).replace("+asyncpg", "")
+        return _sync_url(str(self.database_admin_url))
+
+
+#: Driver sincrono declarado por extenso. `postgresql://` sem driver **nao** e estavel:
+#: no SQLAlchemy 2.0 ele resolve para psycopg2, e no 2.1 passou a resolver para psycopg
+#: (v3). A dependencia declarada no `pyproject.toml` e `psycopg2-binary`, entao a URL sem
+#: driver quebrava com `ModuleNotFoundError: No module named 'psycopg'` assim que o
+#: ambiente instalava o SQLAlchemy novo — no CI primeiro, e no `alembic upgrade head` do
+#: deploy em seguida. Nomear o driver tira o comportamento das maos do default.
+_SYNC_DRIVER: Final[str] = "postgresql+psycopg2"
+
+
+def _sync_url(url: str) -> str:
+    """Troca o driver da URL pelo sincrono, qualquer que seja o que vinha antes.
+
+    Trocar o esquema inteiro, em vez de remover o sufixo `+asyncpg`, cobre tambem a URL
+    que chega sem driver nenhum (`postgresql://...`) — que e como ela vem do ambiente na
+    maioria dos deploys.
+    """
+    _, separator, rest = url.partition("://")
+    if not separator:
+        return url
+    return f"{_SYNC_DRIVER}://{rest}"
 
 
 @lru_cache(maxsize=1)

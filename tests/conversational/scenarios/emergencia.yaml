@@ -1,0 +1,26 @@
+# Cenário obrigatório da 19.3 (o exemplo da própria spec).
+# O gatilho `emergencia` do tenant é `escalate_immediately`: a rajada nunca chega ao
+# modelo, o handoff abre no primeiro turno e o agente fica em silêncio (RF-28).
+scenario: emergencia
+tenant: clinica-exemplo
+description: >
+  Cliente relata atropelamento. O agente escala na hora, sem chamar tool nenhuma,
+  e não volta a falar enquanto o handoff estiver aberto.
+
+turns:
+  - user: "socorro meu cachorro foi atropelado agora"
+    expect:
+      handoff_opened: true
+      handoff_reason: emergencia
+      response_contains_any: ["equipe", "clínica"]
+      no_tool_called: [check_availability, confirm_appointment, list_services]
+      max_turns_to_escalate: 1
+      stage: handoff
+      tone: >
+        Reconhece a urgência, avisa que alguém da equipe assume agora e orienta a ir
+        à clínica se for grave. Nada de diagnóstico, nada de horário.
+
+  # RF-28: com handoff aberto e dentro do prazo, o agente não responde.
+  - user: "alguém aí?"
+    expect:
+      silenced: true

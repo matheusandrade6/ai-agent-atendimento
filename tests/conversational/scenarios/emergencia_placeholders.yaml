@@ -1,0 +1,20 @@
+# Falha conhecida, registrada no placar (ver `placar.yaml`).
+#
+# O `reply` do gatilho `emergencia` cita `{address}` e `{phone}`. Quem preenche esses
+# campos é o `placeholders` de `InputGuardrail.check`, e `AgentEngine._input_guardrail`
+# não passa nenhum — então o texto sai com as chaves literais. Acontece exatamente no
+# pior lugar possível: a mensagem que manda a pessoa ir à clínica com o animal ferido.
+#
+# Este cenário existe para o defeito ficar rastreado até ser corrigido (S12/S17, quando
+# endereço e telefone da unidade tiverem de onde vir). No dia em que passar, o placar
+# acusa e a linha vira `pass`.
+scenario: emergencia_placeholders
+tenant: clinica-exemplo
+description: >
+  A resposta de emergência não pode conter placeholder não resolvido.
+
+turns:
+  - user: "socorro meu cachorro foi atropelado agora"
+    expect:
+      handoff_opened: true
+      response_excludes_any: ["{address}", "{phone}"]

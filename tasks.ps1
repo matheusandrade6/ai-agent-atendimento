@@ -7,6 +7,7 @@ Uso:
     .\tasks.ps1 install   # cria o venv e instala as dependencias
     .\tasks.ps1 migrate
     .\tasks.ps1 test
+    .\tasks.ps1 conv      # so a suite conversacional (19.4)
     .\tasks.ps1 lint
     .\tasks.ps1 check     # migrate + test + lint, para fechar uma sessao
     .\tasks.ps1 dev
@@ -17,7 +18,7 @@ Se o PowerShell recusar a execucao do script:
 
 param(
     [Parameter(Position = 0)]
-    [ValidateSet("up", "down", "install", "migrate", "test", "lint", "fmt", "check", "dev", "worker")]
+    [ValidateSet("up", "down", "install", "migrate", "test", "conv", "lint", "fmt", "check", "dev", "worker")]
     [string]$Task = "check"
 )
 
@@ -73,6 +74,13 @@ switch ($Task) {
     "test" {
         Assert-Venv
         & $Py -m pytest
+    }
+
+    "conv" {
+        # A 19.4 manda rodar a suite inteira a cada mudanca de prompt. Ela nao precisa
+        # de docker nem de chave de API.
+        Assert-Venv
+        & $Py -m pytest -m conversational
     }
 
     "lint" {

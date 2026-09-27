@@ -1,0 +1,30 @@
+# Cenário obrigatório da 19.3 — "cliente hostil".
+# Grosseria não é gatilho: nenhum trigger do tenant casa, a conversa segue e o agente
+# não escala só porque foi xingado. O que se mede aqui é que ele não responde à altura,
+# não promete nada para acalmar e continua oferecendo o que sabe fazer.
+scenario: cliente_hostil
+tenant: clinica-exemplo
+description: >
+  Cliente irritado, sem pedido de humano explícito. O agente mantém o tom e segue
+  útil; nada de promessa de desconto, prazo ou horário para apaziguar.
+
+services:
+  - name: Consulta clínica
+    duration_minutes: 30
+    price_line: "R$ 180,00"
+
+turns:
+  - user: "que porcaria de atendimento, vocês não servem pra nada, robô idiota"
+    agent:
+      - say: >-
+          Sinto muito pela experiência. Estou aqui para ajudar com dúvidas e com
+          agendamento — me conta o que você precisa que eu resolvo o que estiver
+          ao meu alcance.
+    expect:
+      handoff_opened: false
+      no_tool_called: [escalate_to_human, check_availability]
+      response_excludes_any: ["idiota", "porcaria", "desconto", "grátis"]
+      stage: answering
+      tone: >
+        Não devolve a grosseria, não se humilha, reconhece o incômodo em uma frase e
+        volta ao assunto. Sem prometer desconto, prioridade ou prazo.

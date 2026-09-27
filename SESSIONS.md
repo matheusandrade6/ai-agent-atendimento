@@ -42,7 +42,7 @@ tenants, alucinação de horário/preço ou perda de mensagem**, use Opus.
 | S08 | Tools de leitura: `search_knowledge`, `list_services` | 1 | Sonnet | S06, S07 | ✅ feito |
 | S09 | Guardrails de entrada e saída | 1 | **Opus** | S06 | ✅ feito |
 | S10 | Handoff e `escalate_to_human` | 1 | Sonnet | S06, S09 | ✅ feito |
-| S11 | Runner da suíte conversacional | 1 | **Opus** | S06, S08, S09 | ⬜ |
+| S11 | Runner da suíte conversacional | 1 | **Opus** | S06, S08, S09 | ✅ feito |
 | S12 | `CalendarProvider` + Google (OAuth, freebusy, events) | 2 | **Opus** | S02 | ⬜ |
 | S13 | Motor de disponibilidade | 2 | **Opus** | S12, S03 | ⬜ |
 | S14 | Hold, advisory lock, confirmação idempotente | 2 | **Opus** | S13 | ⬜ |
@@ -56,8 +56,13 @@ tenants, alucinação de horário/preço ou perda de mensagem**, use Opus.
 | S22 | Métricas de produto e custo por tenant | 3 | Sonnet | S06, S17 | ⬜ |
 | S23 | Script de onboarding de tenant | 4 | Haiku/Sonnet | S03 | ⬜ |
 | S24 | Lista de espera, LGPD e agenda própria | 4 | Sonnet | S14, S19 | ⬜ |
+| S25 | DEF-01 e DEF-02: placeholder não resolvido e escalada muda | 1 | **Opus** | S11 | ⬜ |
 
 **Caminho crítico:** S01 → S02 → S05 → S06 → S12 → S13 → S14. As demais paralelizam.
+
+**S25 é corretiva:** nasceu de dois defeitos que a suíte conversacional da S11 encontrou
+(`docs/DEFEITOS.md`). Ambos atingem mensagem que a pessoa recebe em momento sensível —
+emergência e pedido de humano. Vale fazer antes da Fase 3.
 
 ---
 
@@ -386,6 +391,36 @@ Aceite: encaixe oferece a um contato por vez; expurgo respeita os prazos por ten
 internal.py passa na mesma bateria de testes de contrato do provider.
 ```
 
+### S25 — DEF-01 e DEF-02 · Opus
+
+```
+Projeto: datamind-agenda.
+Leia: CLAUDE.md, docs/DEFEITOS.md (DEF-01 e DEF-02 inteiros),
+      docs/spec/10-configuracao-por-tenant.md (identity, escalation),
+      tests/conversational/README.md.
+Entregue a Sessao S25 de SESSIONS.md: correcao dos dois defeitos que a suite
+conversacional encontrou.
+
+DEF-01 — placeholder nao resolvido na mensagem de emergencia:
+  1. campos de unidade genericos na config de tenant (endereco e telefone da
+     unidade, validados; nao confundir com persona.address_form nem com
+     channels.whatsapp.phone_number_id);
+  2. AgentEngine._input_guardrail passa `placeholders` para InputGuardrail.check;
+  3. rede de seguranca: placeholder que sobrar nao sai para o cliente;
+  4. o mesmo mecanismo tem de servir a `messages.confirmation`, que a S15/S16 vai
+     formatar com os mesmos campos.
+
+DEF-02 — pedido de humano escala sem responder nada:
+  gatilho que escala sem `reply` passa a avisar a pessoa. Decida entre aviso padrao
+  em codigo e exigencia de `reply` no schema, e registre a escolha em
+  docs/DECISOES.md. Nada especifico de cliente no codigo.
+
+Aceite: os cenarios `emergencia_placeholders` e `pedido_humano_com_aviso` passam e
+sao promovidos a `pass` em tests/conversational/placar.yaml; `emergencia` e
+`pedido_humano` continuam passando sem alteracao; a entrada correspondente sai de
+docs/DEFEITOS.md; `.\tasks.ps1 check` verde.
+```
+
 ---
 
 ## Estado da Fase 0
@@ -401,8 +436,8 @@ Para conferir o ambiente antes de abrir uma sessão nova (PowerShell — `make` 
 no Windows):
 
 ```powershell
-.	asks.ps1 up
-.	asks.ps1 check
+.\tasks.ps1 up
+.\tasks.ps1 check
 ```
 
 ---

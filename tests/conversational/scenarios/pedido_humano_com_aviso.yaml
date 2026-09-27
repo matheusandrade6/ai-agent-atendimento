@@ -1,0 +1,20 @@
+# Falha conhecida, registrada no placar (ver `placar.yaml`).
+#
+# O gatilho `pedido_humano` tem `action: escalate` e nenhum `reply`. Em
+# `InputGuardrail.check`, a mensagem genérica de fora de escopo só entra quando o
+# gatilho **não** escala — então o handoff abre, a equipe é notificada, e o cliente não
+# recebe nada. Do lado dele, o pedido de falar com uma pessoa ficou sem resposta.
+#
+# Onde consertar é decisão de quem for mexer: um `reply` no gatilho (config do tenant,
+# sem tocar em código) ou um aviso padrão para gatilho que escala sem texto. Enquanto
+# não se decide, o defeito fica visível aqui.
+scenario: pedido_humano_com_aviso
+tenant: clinica-exemplo
+description: >
+  Quem pede para falar com uma pessoa precisa ouvir que o pedido foi aceito.
+
+turns:
+  - user: "não tô conseguindo resolver, quero falar com um atendente"
+    expect:
+      handoff_opened: true
+      response_contains_any: ["equipe", "alguém", "já vou chamar"]
