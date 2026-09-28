@@ -32,7 +32,7 @@ from datetime import datetime
 from typing import Final
 
 from app.agent.llm import PromptSegment
-from app.domain.tenant_config import IntakeField, Persona, TenantConfig
+from app.domain.tenant_config import Identity, IntakeField, Persona, TenantConfig
 
 __all__ = [
     "AgentPromptData",
@@ -196,6 +196,7 @@ def block_identity(config: TenantConfig, channel: str) -> str:
     ]
     if identity.about.strip():
         lines.append(identity.about.strip())
+    lines.extend(_unit_lines(identity))
     lines.append(f"Voce conversa por {channel_label} com clientes e potenciais clientes.")
     if config.persona.introduce_as_ai:
         # Exigencia de LGPD (18.4): a pessoa tem direito de saber que fala com uma maquina.
@@ -204,6 +205,42 @@ def block_identity(config: TenantConfig, channel: str) -> str:
             "Nunca finja ser uma pessoa."
         )
     return "\n".join(lines)
+
+
+def _unit_lines(identity: Identity) -> list[str]:
+    """Endereco e telefone da unidade, quando a config os tem.
+
+    "Onde voces ficam?" e "qual o telefone?" sao as perguntas mais banais que existem, e o
+    modelo nao tinha como responder: endereco nao vem de tool nenhuma e nao esta na base de
+    conhecimento. Sem estes dados aqui, a saida era o agente inventar ou escalar uma
+    pergunta trivial — e inventar endereco tem o mesmo custo que inventar horario, porque a
+    pessoa vai ate o lugar.
+
+    Sao fato da config, nao conteudo de usuario: entram como `identity.name` e
+    `identity.about` entram, sem `<dado>`. Campo vazio nao gera linha — o que nao esta
+    escrito continua caindo em "nunca invente dados" do bloco de limites.
+
+    **O guardrail de saida nao confere isso.** Endereco nao e evidencia (D-29 vale para
+    hora, data e preco), entao a conferencia mecanica aqui e a do texto ter saido da config.
+    Consequencia aceita: endereco que contenha algo com cara de relogio ("sala 8h") e
+    descartado pela regra de hora sem evidencia. Afrouxar a regra de hora para caber
+    endereco trocaria o risco de maior impacto do projeto por uma conveniencia.
+    """
+    address = identity.address.strip()
+    phone = identity.phone.strip()
+    if not address and not phone:
+        return []
+
+    lines: list[str] = []
+    if address:
+        lines.append(f"Endereco da unidade: {address}")
+    if phone:
+        lines.append(f"Telefone da unidade: {phone}")
+    lines.append(
+        "Informe esses dados exatamente como estao escritos acima, e nada alem deles: "
+        "nao complete endereco, nao suponha bairro, referencia, ramal nem outro telefone."
+    )
+    return lines
 
 
 def block_role() -> str:

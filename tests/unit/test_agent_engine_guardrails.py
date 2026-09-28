@@ -132,6 +132,41 @@ async def test_pedido_de_humano_curto_circuita_sem_escalar_o_custo(
     assert outcome.usage.total_input_tokens == 0
 
 
+async def test_o_motor_preenche_os_campos_da_unidade_no_texto_do_gatilho(
+    config: TenantConfig,
+) -> None:
+    """DEF-01 ponta a ponta: e o motor que junta config e turno e passa os `placeholders`.
+
+    A mensagem sob teste e a que manda a pessoa sair de casa com o animal ferido. O que ela
+    precisa levar e justamente o endereco e o telefone.
+    """
+    provider = ScriptedProvider(script=[text_response("nao deveria ser chamado")])
+    outcome = await make_engine(provider).run_turn(
+        make_request(config, "socorro meu cachorro foi atropelado")
+    )
+
+    assert config.identity.address in outcome.reply
+    assert config.identity.phone in outcome.reply
+    assert not any("{" in mensagem for mensagem in outcome.messages)
+
+
+async def test_pedido_de_humano_nao_abre_handoff_calado(config: TenantConfig) -> None:
+    """DEF-02 ponta a ponta: o handoff abre e o cliente e avisado no mesmo turno.
+
+    Sem o aviso, por RF-28 a conversa fica muda tambem nas mensagens seguintes — a pessoa
+    repete o pedido no vazio e desiste.
+    """
+    provider = ScriptedProvider(script=[text_response("nao deveria ser chamado")])
+    outcome = await make_engine(provider).run_turn(
+        make_request(config, "quero falar com um atendente")
+    )
+
+    assert outcome.escalate
+    assert outcome.escalation_reason == "trigger:pedido_humano"
+    assert outcome.messages, "escalada sem mensagem nenhuma deixa a pessoa no vacuo"
+    assert "equipe" in outcome.reply.lower()
+
+
 async def test_recusa_de_orientacao_clinica_responde_sem_handoff(
     config: TenantConfig,
 ) -> None:

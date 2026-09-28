@@ -724,6 +724,117 @@ de tipo faltando, o segundo foi o deploy quebrado.
 
 ---
 
+## D-38 · Endereço e telefone da unidade são campos de `identity`, e placeholder sem valor não sai · S25
+
+**Contexto.** O `reply` do gatilho de emergência cita `{address}` e `{phone}`;
+`messages.confirmation` cita `{address}` de novo, além dos campos do agendamento. Nada
+preenchia isso: o motor chamava `InputGuardrail.check` sem `placeholders` e, mesmo que
+passasse, não havia de onde tirar os valores — `identity` tinha só `name`, `vertical` e
+`about`. A pessoa com o animal atropelado no colo lia `{address}` na tela (DEF-01).
+
+**Decisão.** Três camadas, em `app/domain/templates.py`:
+
+1. **Nome validado.** `KNOWN_PLACEHOLDERS` é a lista do que o sistema sabe preencher, e a
+   config de tenant recusa texto que cite nome fora dela. Um `{endereco}` escrito em
+   português nunca teria quem o preenchesse; descobrir isso no onboarding é de graça perto
+   de descobrir na primeira emergência. A conferência é do **nome**, não do valor — estática,
+   imune à expansão de `${VAR}`.
+2. **Valor.** `identity.address` e `identity.phone`, genéricos (unidade que atende, em
+   qualquer vertical) e validados: endereço curto demais, telefone com menos de 8 dígitos ou
+   campo que contenha outro placeholder são erro. `TenantConfig.template_values()` monta o
+   mapa e `AgentEngine._input_guardrail` o passa, completado com o nome do contato. É o
+   mesmo mapa que a confirmação de agendamento (S15/S16) vai usar, só faltando os campos do
+   agendamento.
+3. **Rede de segurança.** `drop_unresolved` roda dentro de `split_message`, por onde passa
+   **toda** mensagem que vai ao cliente — curto-circuito de gatilho, resposta aprovada,
+   substituição por recusa e fallback do motor. Um caminho novo que esqueça de preencher
+   continua coberto, que é exatamente o que faltou aqui. O descarte é por frase: "va direto
+   a clinica: {address}." sai inteira, porque apagar só o campo prometeria um dado que não
+   veio. Se não sobrar nada, o campo é apagado e o resto fica — mensagem torta é ruim,
+   silêncio num gatilho de emergência é pior.
+
+**A tolerância de `_safe_format` fica.** Ela agora vive em `templates.fill`, com o mesmo
+motivo: `KeyError` ali deixaria a pessoa sem resposta nenhuma. Ela deixa de ser a última
+palavra porque a camada 3 existe.
+
+**Campo vazio fica fora do mapa, não vira string vazia.** Assim o placeholder continua sem
+resolver e a frase é descartada, em vez de o cliente receber "va direto a clinica: .".
+
+**Onde a falta do campo é erro fatal, e onde não é.** `load_tenant_config` (arquivo em git,
+CI, `--validate` do onboarding) recusa config que cite `{address}` com o campo vazio:
+falhar ali é de graça e o modo de falha é visível. O caminho de produção —
+`tenants.config` + `resolved()`, que roda a cada turno em `app.domain.tenant_registry` —
+**não** levanta por isso: um `${VAR}` ausente no ambiente viraria "config inválida" e
+calaria todas as conversas do tenant, que é pior do que o defeito sendo corrigido. Ali quem
+cobre é a camada 3.
+
+**Multi-unidade continua sendo tema da S12.** Quando `resources` existir, o endereço por
+recurso entra no mapa de placeholders do turno e cobre o da unidade, sem mudar quem cita
+nem quem valida.
+
+---
+
+## D-39 · Gatilho que escala sem `reply` usa aviso padrão do código, não exigência de schema · S25
+
+**Contexto.** `pedido_humano` casa por `match_intent: ask_for_human` e não declara `reply`.
+A mensagem genérica do tenant só entrava em gatilho que **não** escala, então o handoff
+abria, a equipe era notificada e o cliente não recebia nada. Pior do que parece: por RF-28
+o agente também ignora as mensagens seguintes enquanto o silêncio do handoff durar, então a
+pessoa repete o pedido no vazio e desiste (DEF-02).
+
+**As duas saídas.** Exigir `reply` em gatilho que escala, no schema de tenant; ou um aviso
+padrão em código para gatilho que escala sem texto.
+
+**Decisão: aviso padrão em código** (`DEFAULT_HANDOFF_NOTICE`, em
+`app/agent/guardrails.py`), com a redação vindo de `messages.handoff_notice` quando o tenant
+a escrever. A config manda no texto; o código garante que exista um.
+
+**Por que não a exigência de schema.** Escalar sem avisar a pessoa não é uma preferência de
+cliente, é comportamento inaceitável do produto — e garantia de produto não se delega a
+quem preenche YAML. A exigência de schema ainda deixaria dois furos: ela quebra as configs
+já publicadas no deploy seguinte (inclusive `_template.yaml`, que traz `pedido_humano` sem
+`reply`) e não cobre o caso em que o `reply` existe mas não sobra texto dele — um `reply`
+que só cita placeholder sem valor volta a ser escalada muda. O código cobre os três: gatilho
+sem `reply`, `reply` vazio e `reply` que fica sem texto útil depois de `drop_unresolved`
+caem todos no aviso.
+
+**Recusa continua caindo em `messages.out_of_scope`.** Ali não há garantia a dar: recusar
+sem texto configurado não abandona ninguém, só devolve o turno para o modelo. A distinção
+entre recusa e escalada fica mais nítida, não mais fraca — são dois textos diferentes.
+
+**Nada específico de cliente entrou no código.** O aviso não nomeia negócio, vertical nem
+pessoa; é a frase mínima que qualquer tenant precisaria dizer.
+
+---
+
+## D-40 · O endereço da unidade entra no prompt, mas não é evidência · S25
+
+**Contexto.** Com `identity.address` e `identity.phone` existindo (D-38), "onde vocês
+ficam?" e "qual o telefone?" continuavam sem resposta: endereço não vem de tool nenhuma e
+não está na base de conhecimento. A saída do agente era inventar ou escalar uma pergunta
+banal — e inventar endereço custa o mesmo que inventar horário, porque a pessoa vai até o
+lugar.
+
+**Decisão.** Os dois campos entram no bloco `[IDENTIDADE]`, com a instrução de informá-los
+exatamente como estão e não completar o que não está escrito (bairro, referência, ramal,
+outro telefone). São fato da config e entram sem `<dado>`, como `identity.name` e
+`identity.about` — não são conteúdo de usuário. Campo vazio não gera linha: o que não está
+escrito continua caindo em "nunca invente dados" do bloco de limites, e nenhum tenant é
+obrigado a preencher.
+
+**Endereço não é evidência.** D-29 vale para hora, data e preço, e continua valendo só para
+isso. A conferência mecânica do endereço é ele ter saído da config, não o guardrail de
+saída. **Consequência aceita:** endereço que contenha algo com cara de relógio ("sala 8h")
+é descartado pela regra de hora sem evidência, e o turno é regenerado. Afrouxar a regra de
+hora para caber endereço trocaria o risco de maior impacto do projeto (seção 21) por uma
+conveniência de cadastro; quem tiver esse endereço escreve `sala 8` no campo.
+
+**Amarrado por cenário.** `endereco_da_unidade` prova as duas metades: a resposta sai com o
+endereço, sem tool e sem handoff, e sobrevive ao guardrail de saída. Se um dia o número da
+rua passar a ser lido como horário inventado, é esse cenário que cai.
+
+---
+
 ## Pendências de verificação
 
 Todas fechadas. Estado verificado ao fim da Fase 0, contra Postgres 16 real:
@@ -791,7 +902,7 @@ Estado ao fim da S11, contra Postgres 16 e Redis reais:
 | `mypy --strict` | ✅ limpo (52 arquivos de `app`, mais 9 da suíte) |
 
 Dois defeitos encontrados pela própria suíte e registrados no placar, não corrigidos
-nesta sessão (fora do escopo da S11):
+nesta sessão (fora do escopo da S11) — **ambos corrigidos na S25**, D-38 e D-39:
 
 1. **`emergencia_placeholders`** — a resposta de emergência sai com `{address}` e
    `{phone}` literais. `AgentEngine._input_guardrail` não passa `placeholders` para
@@ -800,3 +911,20 @@ nesta sessão (fora do escopo da S11):
 2. **`pedido_humano_com_aviso`** — quem pede para falar com uma pessoa não recebe resposta
    nenhuma: o gatilho `pedido_humano` escala sem `reply`, e a mensagem genérica só entra
    em gatilho que não escala. O handoff abre e a equipe é avisada; o cliente fica no vácuo.
+
+---
+
+Estado ao fim da S25, contra Postgres 16 e Redis reais:
+
+| Item | Estado |
+|---|---|
+| Migrations `0001`–`0005` | ✅ aplicadas (`0005 (head)`) — nenhuma nova: a correção é de config e de código |
+| DEF-01 (placeholder não resolvido) | ✅ corrigido — `app/domain/templates.py`, `identity.address`/`identity.phone`, `placeholders` no motor |
+| DEF-02 (escalada muda) | ✅ corrigido — aviso padrão em código, redação por `messages.handoff_notice` |
+| Endereço e telefone no bloco `[IDENTIDADE]` (D-40) | ✅ com cenário `endereco_da_unidade` |
+| `emergencia_placeholders` e `pedido_humano_com_aviso` | ✅ `pass` no placar (eram os dois `known_failure`) |
+| `emergencia` e `pedido_humano` | ✅ continuam passando, sem alteração nos cenários |
+| `docs/DEFEITOS.md` | ✅ sem defeito aberto |
+| Total: 531 testes (37 novos), nenhum pulado | ✅ verde |
+| `ruff check` + `ruff format --check` | ✅ limpo |
+| `mypy --strict` | ✅ limpo (53 arquivos de `app`) |

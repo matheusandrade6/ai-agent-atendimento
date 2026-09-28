@@ -77,8 +77,8 @@ Texto é comparado sem acento e sem caixa.
 de cenário aprovado e cenário enfraquecido (menos asserções do que o registrado).
 
 `known_failure` é defeito conhecido, com motivo obrigatório, que **tem** de continuar
-falhando — quando passar, a suíte manda promover a linha. Hoje há dois, ambos descritos
-em `placar.yaml`.
+falhando — quando passar, a suíte manda promover a linha. Hoje não há nenhum: os dois que
+a própria suíte encontrou na S11 foram corrigidos na S25 e as linhas viraram `pass`.
 
 ## Juiz de tom e modo ao vivo
 

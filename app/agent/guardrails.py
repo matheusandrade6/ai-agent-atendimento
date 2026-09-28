@@ -54,11 +54,13 @@ from app.agent.temporal import (
 )
 from app.core.telemetry import get_logger
 from app.domain.conditions import evaluate_condition
+from app.domain.templates import drop_unresolved, fill
 from app.domain.tenant_config import EscalationTrigger, Limits, TenantConfig
 
 log = get_logger(__name__)
 
 __all__ = [
+    "DEFAULT_HANDOFF_NOTICE",
     "InputDecision",
     "InputGuardrail",
     "OutputContext",
@@ -292,11 +294,14 @@ class InputGuardrail:
 
         reply = _safe_format(trigger.reply.strip(), placeholders or {})
         escalates = trigger.action in ("escalate", "escalate_immediately")
-        if not reply and not escalates:
-            # Recusa sem texto configurado cai na mensagem generica do tenant; sem ela,
-            # nao ha o que curto-circuitar e o turno segue para o modelo.
-            reply = config.messages.out_of_scope.strip()
+        # `drop_unresolved` porque um `reply` que so cita placeholder sem valor nao tem
+        # texto nenhum a entregar — e um gatilho que escala calado e o proprio DEF-02.
+        if not drop_unresolved(reply).strip():
+            reply = _reply_without_text(config, escalates=escalates)
             if not reply:
+                # Recusa sem texto nenhum configurado: nao ha o que curto-circuitar e o
+                # turno segue para o modelo. Escalonamento nunca cai aqui — ele sempre
+                # tem o aviso padrao.
                 log.warning("guardrail_entrada_recusa_sem_texto", trigger=trigger.id)
                 return InputDecision(injection_flags=flags)
 
@@ -311,17 +316,42 @@ class InputGuardrail:
         )
 
 
-_PLACEHOLDER: Final[re.Pattern[str]] = re.compile(r"\{([a-z_][a-z0-9_]*)\}")
+#: Aviso padrao de escalonamento, para gatilho que escala sem `reply` configurado.
+#: Generico e sem nada de cliente nenhum — o tenant que quiser outra redacao escreve
+#: `messages.handoff_notice` ou o `reply` do proprio gatilho.
+DEFAULT_HANDOFF_NOTICE: Final[str] = (
+    "Ja estou chamando alguem da equipe para falar com voce. So um instante."
+)
+
+
+def _reply_without_text(config: TenantConfig, *, escalates: bool) -> str:
+    """Texto do curto-circuito quando o gatilho nao traz `reply`.
+
+    **Escalonamento sempre avisa.** Abrir handoff calado deixa a pessoa olhando para uma
+    conversa muda — e, por RF-28, o agente tambem ignora as mensagens seguintes enquanto o
+    silencio durar, entao ela repete o pedido e desiste (DEF-02). A garantia de que isso
+    nao acontece e do codigo: depender de cada onboarding lembrar de escrever um `reply`
+    seria depender de uma pendencia de config com modo de falha silencioso, que e o pior
+    tipo. A config continua mandando na redacao (`messages.handoff_notice`), nao na
+    existencia do aviso.
+
+    **Recusa continua caindo na mensagem generica do tenant** — nao ha garantia a dar ali:
+    recusar sem texto configurado nao abandona ninguem, so devolve o turno para o modelo.
+    """
+    if not escalates:
+        return config.messages.out_of_scope.strip()
+    return config.messages.handoff_notice.strip() or DEFAULT_HANDOFF_NOTICE
 
 
 def _safe_format(template: str, values: Mapping[str, str]) -> str:
-    """`str.format` que nao explode com placeholder desconhecido.
+    """Preenche o texto do tenant sem explodir com placeholder sem valor.
 
-    O texto vem do YAML do cliente e pode citar `{address}` antes de existir um endereco
-    para preencher. Um `KeyError` aqui deixaria a pessoa sem resposta num gatilho de
-    emergencia — o lugar do projeto onde isso e menos aceitavel.
+    A tolerancia e de `app.domain.templates.fill` e e deliberada: um `KeyError` aqui
+    deixaria a pessoa sem resposta num gatilho de emergencia, o lugar do projeto onde isso
+    e menos aceitavel. O que sobrar sem valor nao chega ao cliente — quem remove e a rede
+    de seguranca em `split_message`.
     """
-    return _PLACEHOLDER.sub(lambda m: values.get(m.group(1), m.group(0)), template)
+    return fill(template, values)
 
 
 # ================================== saida (passo 8) ==================================
@@ -526,8 +556,17 @@ def split_message(text: str, limit: int) -> tuple[str, ...]:
     A quebra procura a fronteira mais natural que ainda sobra dentro do limite e nunca
     parte uma palavra. O corte tem um piso (`limit // 3`): sem ele, um texto com virgula
     logo no comeco viraria uma mensagem de tres palavras seguida de um parede de texto.
+
+    Rede de seguranca de placeholder
+    --------------------------------
+    Toda resposta que vira mensagem para o cliente passa por aqui: curto-circuito de
+    gatilho, resposta aprovada, substituicao por recusa e o fallback do motor. Por isso a
+    varredura de `{placeholder}` sem valor mora neste ponto e nao em cada chamador — um
+    caminho novo que esqueca de limpar o texto continua coberto, que e exatamente o que
+    faltou em DEF-01. A limpeza acontece antes da quebra, senao o limite seria calculado
+    sobre caracteres que nao vao ser enviados.
     """
-    remaining = text.strip()
+    remaining = drop_unresolved(text.strip())
     if not remaining:
         return ()
     if limit <= 0:

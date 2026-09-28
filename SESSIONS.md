@@ -56,13 +56,14 @@ tenants, alucinação de horário/preço ou perda de mensagem**, use Opus.
 | S22 | Métricas de produto e custo por tenant | 3 | Sonnet | S06, S17 | ⬜ |
 | S23 | Script de onboarding de tenant | 4 | Haiku/Sonnet | S03 | ⬜ |
 | S24 | Lista de espera, LGPD e agenda própria | 4 | Sonnet | S14, S19 | ⬜ |
-| S25 | DEF-01 e DEF-02: placeholder não resolvido e escalada muda | 1 | **Opus** | S11 | ⬜ |
+| S25 | DEF-01 e DEF-02: placeholder não resolvido e escalada muda | 1 | **Opus** | S11 | ✅ feito |
 
 **Caminho crítico:** S01 → S02 → S05 → S06 → S12 → S13 → S14. As demais paralelizam.
 
 **S25 é corretiva:** nasceu de dois defeitos que a suíte conversacional da S11 encontrou
 (`docs/DEFEITOS.md`). Ambos atingem mensagem que a pessoa recebe em momento sensível —
-emergência e pedido de humano. Vale fazer antes da Fase 3.
+emergência e pedido de humano. Feita: `docs/DEFEITOS.md` não tem mais defeito aberto, os
+dois cenários são `pass` no placar e as decisões estão em `docs/DECISOES.md`, D-38 e D-39.
 
 ---
 

@@ -1,0 +1,25 @@
+# Pergunta banal que o agente não tinha como responder: endereço não vem de tool nenhuma
+# nem da base de conhecimento. Desde a S25 ele vem do bloco `[IDENTIDADE]`, de
+# `identity.address` e `identity.phone` (docs/DECISOES.md, D-38 e D-40).
+#
+# O que este cenário protege é a outra metade: endereço **não** é evidência, então a
+# resposta que o repete passa pelo guardrail de saída como qualquer outra e tem de
+# sobreviver a ele. Um endereço com número de rua não pode ser confundido com horário
+# inventado — e um dia em que for, é aqui que aparece.
+scenario: endereco_da_unidade
+tenant: clinica-exemplo
+description: >
+  O agente informa endereço e telefone da unidade sem chamar tool e sem escalar.
+
+turns:
+  - user: "oi, onde vocês ficam? e qual o telefone?"
+    agent:
+      - say: >
+          Ficamos na Rua dos Pinheiros, 1234 - Pinheiros, Sao Paulo - SP.
+          O telefone é (11) 3333-4444.
+    expect:
+      handoff_opened: false
+      response_contains_any: ["Rua dos Pinheiros, 1234"]
+      response_excludes_any: ["{address}", "{phone}"]
+      no_tool_called: [check_availability, confirm_appointment, escalate_to_human]
+      prompt_isolates_user_content: true

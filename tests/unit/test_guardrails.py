@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 
 from app.agent.guardrails import (
+    DEFAULT_HANDOFF_NOTICE,
     InputGuardrail,
     OutputContext,
     OutputGuardrail,
@@ -207,6 +208,90 @@ async def test_placeholder_sem_valor_nao_derruba_o_gatilho(config: TenantConfig)
     )
     assert "11 3333-4444" in decision.reply
     assert "{address}" in decision.reply
+
+
+async def test_placeholders_da_config_entram_na_resposta_do_gatilho(
+    config: TenantConfig,
+) -> None:
+    """DEF-01: e a mensagem que manda a pessoa ir a clinica; ela precisa do endereco."""
+    decision = await InputGuardrail().check(
+        config=config,
+        text="socorro, ele foi atropelado",
+        tenant_id=TENANT_ID,
+        contact_id=CONTACT_ID,
+        placeholders=config.template_values(),
+    )
+    assert config.identity.address in decision.reply
+    assert config.identity.phone in decision.reply
+    assert "{" not in decision.reply
+
+
+async def test_gatilho_que_escala_sem_reply_avisa_o_cliente(config: TenantConfig) -> None:
+    """DEF-02: abrir handoff calado deixa a pessoa falando com uma conversa muda.
+
+    `pedido_humano` nao declara `reply` e o tenant de exemplo nao configura
+    `messages.handoff_notice` — de proposito, para o aviso testado aqui ser o do codigo.
+    """
+    decision = await InputGuardrail().check(
+        config=config,
+        text="quero falar com um atendente",
+        tenant_id=TENANT_ID,
+        contact_id=CONTACT_ID,
+    )
+    assert decision.action == "escalate"
+    assert decision.trigger_id == "pedido_humano"
+    assert decision.reply == DEFAULT_HANDOFF_NOTICE
+
+
+async def test_aviso_de_escalonamento_configurado_ganha_do_padrao(
+    config: TenantConfig,
+) -> None:
+    """A config manda na redacao; o codigo garante que exista uma."""
+    data = config.model_dump()
+    data["messages"]["handoff_notice"] = "Ja chamei a Ana, ela te responde em instantes."
+    decision = await InputGuardrail().check(
+        config=TenantConfig.model_validate(data),
+        text="quero falar com um atendente",
+        tenant_id=TENANT_ID,
+        contact_id=CONTACT_ID,
+    )
+    assert decision.reply == "Ja chamei a Ana, ela te responde em instantes."
+
+
+async def test_reply_que_e_so_placeholder_sem_valor_cai_no_aviso(
+    config: TenantConfig,
+) -> None:
+    """Reply sem texto util e reply ausente: escalar calado nao e opcao."""
+    data = config.model_dump()
+    for trigger in data["escalation"]["triggers"]:
+        if trigger["id"] == "pedido_humano":
+            trigger["reply"] = "{address}"
+    decision = await InputGuardrail().check(
+        config=TenantConfig.model_validate(data),
+        text="quero falar com um atendente",
+        tenant_id=TENANT_ID,
+        contact_id=CONTACT_ID,
+    )
+    assert decision.reply == DEFAULT_HANDOFF_NOTICE
+
+
+async def test_recusa_sem_texto_nenhum_devolve_o_turno_ao_modelo(
+    config: TenantConfig,
+) -> None:
+    """Recusa nao tem garantia a dar: sem texto configurado, o turno segue para o modelo."""
+    data = config.model_dump()
+    data["messages"]["out_of_scope"] = ""
+    for trigger in data["escalation"]["triggers"]:
+        if trigger["id"] == "orientacao_clinica":
+            trigger["reply"] = ""
+    decision = await InputGuardrail().check(
+        config=TenantConfig.model_validate(data),
+        text="qual remedio eu dou pra ele?",
+        tenant_id=TENANT_ID,
+        contact_id=CONTACT_ID,
+    )
+    assert decision.action == "allow"
+    assert decision.reply == ""
 
 
 async def test_rate_limit_derruba_a_rajada_em_silencio(config: TenantConfig) -> None:
@@ -494,6 +579,13 @@ def test_resposta_curta_nao_e_quebrada(config: TenantConfig) -> None:
         "Oi! Como posso ajudar?", OutputContext(config=config, today=TODAY)
     )
     assert decision.messages == ("Oi! Como posso ajudar?",)
+
+
+def test_a_quebra_e_a_rede_de_seguranca_de_placeholder(config: TenantConfig) -> None:
+    """Toda mensagem que vai ao cliente passa por `split_message` — inclusive as que
+    nenhum caminho novo se lembrar de limpar (DEF-01)."""
+    partes = split_message("Vou chamar a equipe. Va a clinica: {address}.", 600)
+    assert partes == ("Vou chamar a equipe.",)
 
 
 def test_resposta_vazia_nao_vira_mensagem(config: TenantConfig) -> None:
