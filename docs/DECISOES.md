@@ -835,6 +835,72 @@ rua passar a ser lido como horário inventado, é esse cenário que cai.
 
 ---
 
+## D-41 · O refresh token fica atrás de um `SecretStore`; a cifra é do secret manager · S12
+
+**Contexto.** A 14.3 pede refresh token "cifrado em secret store, referenciado por
+`providers.credentials_ref`". Não existe secret manager escolhido nem biblioteca de
+criptografia nas dependências, e inventar um esquema de cifra próprio (chave mestra na
+env, tokens cifrados no banco) deixaria o token no banco — que é o que a seção 18.1 e o
+comentário de `Provider.credentials_ref` proíbem.
+
+**Decisão.** `app.core.secrets.SecretStore` é um Protocol de uma operação
+(`get(ref) -> str`). `credentials_ref` é só o ponteiro; o token nunca é persistido nem
+logado, e a mensagem de `SecretNotFound` carrega o ponteiro, não o valor.
+`EnvSecretStore` (`env:NOME`) serve ao desenvolvimento e a deploys simples; o secret
+manager real entra como outra implementação, sem tocar em `calendar/`.
+
+**Fora do escopo da S12.** O fluxo de consentimento (URL de autorização e troca do `code`
+pelo refresh token) é do onboarding (S23): é ele que **grava** no secret store. A S12 só
+**consome** o token. Sem `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` o provider não troca
+token — falha com `CalendarAuthError`, não com erro opaco.
+
+---
+
+## D-42 · Insert idempotente por `409` + busca por `iCalUID`; `freebusy` falha fechado · S12
+
+**Insert.** O Google recusa um segundo `events.insert` com o mesmo `iCalUID` (`409`).
+Tratamos o `409` como "já existe": buscamos por `iCalUID` e devolvemos o evento. É isso que
+torna seguro retentar um insert cuja resposta se perdeu (503 *depois* de gravar), caso em
+que a primeira tentativa funcionou. O teste usa um calendário falso **com estado**, para
+afirmar sobre o calendário (1 evento), não sobre o número de chamadas. `409` com o evento
+cancelado é `CalendarPermanentError`: ressuscitar evento apagado por outra pessoa não é
+decisão deste módulo.
+
+**`freebusy`.** Calendário que a resposta não traz, ou traz com `errors`, **não** some do
+resultado nem vira lista vazia: levanta `CalendarQueryError` (com o que respondeu em
+`partial`). Tratar silêncio como "livre" é inventar disponibilidade (invariante 1).
+Lotes de até 50 calendários por chamada; cache de 60s por `(calendário, janela)` **na
+instância** — uma por `credentials_ref`, para não misturar tenants — e invalidado por
+qualquer escrita nossa naquele calendário, senão o "livre" antigo sobreviveria ao evento
+que acabamos de criar. Cache em processo: com N workers, cada um tem o seu; para uma janela
+de 60s isso é aceitável e evita um Redis a mais no caminho crítico.
+
+---
+
+## D-43 · Retentativa: o que retenta, o que não, e para onde vai o resto · S12
+
+| Resposta | Comportamento |
+|---|---|
+| `5xx`, `429`, `403` com `rateLimitExceeded`/`userRateLimitExceeded`, falha de transporte | backoff exponencial com jitter (`Retry-After` tem precedência) até `google_max_tries`; esgotado → `CalendarSyncPending` |
+| `401` | renova o access token **uma vez** e repete; segundo `401` → `CalendarAuthError` |
+| `invalid_grant` na renovação | `CalendarAuthError` na hora — só o cliente refazendo o consentimento resolve |
+| outros `403`/`4xx` | `CalendarPermanentError` (`404` → `CalendarNotFound`), sem retentativa |
+| `404`/`410` em `delete` | sucesso: o estado desejado (evento inexistente) é o que existe |
+| `410` em `sync_changes` | descarta o token e relê do zero, devolvendo `full_sync=True` (13.5) |
+
+`app.calendar.sync_state.push_appointment_event` traduz o desfecho em
+`appointments.sync_status`: `synced`, `pending_sync` (transitório persistente, com log
+`error` — o alerta ao operador da 14.3) ou `sync_failed` (auth/permanente, precisa de
+humano). Nunca propaga a falha: o agendamento já está no banco e o banco é a fonte de
+verdade. **Chamar fora da transação do advisory lock**, para não segurar o profissional/dia
+durante dezenas de segundos de retentativa por causa de uma API de terceiros.
+
+**Em aberto, de quem usa.** S14 decide *quando* chamar `push_appointment_event` e o texto
+com que o agente avisa "confirmo em instantes". O job que reprocessa `pending_sync` não
+existe ainda (cabe em S19/S20, junto do cron).
+
+---
+
 ## Pendências de verificação
 
 Todas fechadas. Estado verificado ao fim da Fase 0, contra Postgres 16 real:
@@ -928,3 +994,20 @@ Estado ao fim da S25, contra Postgres 16 e Redis reais:
 | Total: 531 testes (37 novos), nenhum pulado | ✅ verde |
 | `ruff check` + `ruff format --check` | ✅ limpo |
 | `mypy --strict` | ✅ limpo (53 arquivos de `app`) |
+
+
+---
+
+Estado ao fim da S12:
+
+| Item | Estado |
+|---|---|
+| `CalendarProvider` (Protocol da 14.3) + `GoogleCalendarProvider` | ✅ `app/calendar/base.py`, `app/calendar/google.py` |
+| Aceite com `respx`: `freebusy`, insert idempotente (mesmo `iCalUID` = 1 evento), `410 Gone` no `syncToken`, `403 rateLimitExceeded` | ✅ 43 testes em `tests/unit/test_google_calendar.py` |
+| Mutação: sem tratar `409`/`410`, 3 testes caem | ✅ verificado à mão |
+| `push_appointment_event` (`pending_sync`) — lógica de estado | ✅ 4 testes unitários, sessão falsa |
+| `push_appointment_event` — `UPDATE` contra Postgres real | ✅ 2 testes em `tests/integration/test_calendar_sync_state.py` |
+| `ruff check` | ✅ limpo |
+| `mypy app` | ✅ limpo (57 arquivos) |
+| Total: 580 testes, nenhum pulado, contra Postgres 16 e Redis reais | ✅ verde |
+

@@ -74,6 +74,21 @@ class Settings(BaseSettings):
     whatsapp_access_token: str = ""
     whatsapp_api_base_url: str = "https://graph.facebook.com"
 
+    # --- Google Calendar (secao 14.3) ---
+    # O client OAuth e do produto (uma app registrada no Google Cloud). O que e por
+    # tenant/profissional e o refresh token, que fica no secret store e e achado por
+    # `providers.credentials_ref` — nunca aqui, nunca no banco.
+    google_client_id: str = ""
+    google_client_secret: str = ""
+    google_token_url: str = "https://oauth2.googleapis.com/token"
+    google_calendar_base_url: str = "https://www.googleapis.com/calendar/v3"
+    google_max_tries: int = 5
+    google_backoff_base_seconds: float = 1.0
+    google_backoff_max_seconds: float = 30.0
+    google_freebusy_cache_seconds: float = 60.0
+    # Janela do full sync: sem `timeMin` o Google devolveria a historia inteira da agenda.
+    google_full_sync_days_back: int = 30
+
     # --- seguranca ---
     secret_key: str = "dev-only-change-me"
     slot_token_secret: str = "dev-only-change-me"
