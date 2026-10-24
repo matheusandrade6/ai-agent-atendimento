@@ -43,7 +43,7 @@ tenants, alucinação de horário/preço ou perda de mensagem**, use Opus.
 | S09 | Guardrails de entrada e saída | 1 | **Opus** | S06 | ✅ feito |
 | S10 | Handoff e `escalate_to_human` | 1 | Sonnet | S06, S09 | ✅ feito |
 | S11 | Runner da suíte conversacional | 1 | **Opus** | S06, S08, S09 | ✅ feito |
-| S12 | `CalendarProvider` + Google (OAuth, freebusy, events) | 2 | **Opus** | S02 | ⬜ |
+| S12 | `CalendarProvider` + Google (OAuth, freebusy, events) | 2 | **Opus** | S02 | ✅ feito |
 | S13 | Motor de disponibilidade | 2 | **Opus** | S12, S03 | ⬜ |
 | S14 | Hold, advisory lock, confirmação idempotente | 2 | **Opus** | S13 | ⬜ |
 | S15 | `slot_token` assinado + tools de escrita | 2 | Sonnet | S14 | ⬜ |
