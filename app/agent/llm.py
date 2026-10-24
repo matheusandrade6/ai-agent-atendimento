@@ -404,7 +404,10 @@ def _message_param(message: LLMMessage) -> MessageParam:
                 "is_error": block.is_error,
             }
             content.append(result_block)
-    return {"role": message.role, "content": content}
+    # `cast` porque, no SDK 2.x, `MessageParam` virou uniao com `SystemMessageParam` e o
+    # `role` literal deste dict nao a resolve; no 1.x era um TypedDict unico. O formato
+    # e o mesmo nas duas.
+    return cast(MessageParam, {"role": message.role, "content": content})
 
 
 def _tool_param(tool: ToolSchema) -> ToolUnionParam:
