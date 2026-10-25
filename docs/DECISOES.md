@@ -992,6 +992,82 @@ tool.
 
 ---
 
+## D-49 · Advisory lock por (dono, dia UTC), em todos os dias que o bloco toca · S14
+
+A 13.4 pede `pg_advisory_xact_lock(hashtext(provider_id::text || date))`. Detalhes que a
+spec não fixa:
+
+- **Dono:** profissional **e** recurso. Sem a chave do recurso, dois profissionais
+  disputando a mesma sala em locks diferentes passariam juntos pela checagem.
+- **Dia:** o dia UTC, não o da unidade — é só partição do lock, não regra de negócio. O
+  bloco (atendimento + buffers) trava **todos** os dias que toca: dois blocos que se
+  sobrepõem sempre compartilham uma chave, inclusive atravessando a meia-noite.
+- **Ordem:** todas as chaves numa instrução só, deduplicadas e em ordem de `hashtext`.
+  Quem precisa de chaves em comum as pega na mesma ordem, então não há deadlock entre
+  pedidos — nem quando `hashtext` colide para chaves diferentes (colisão só serializa a
+  mais).
+
+O lock é tomado **antes** da checagem de sobreposição, no hold e na confirmação. Em READ
+COMMITTED, a leitura feita depois de ganhar o lock já enxerga o que o dono anterior
+gravou, porque ele só solta o lock no commit.
+
+---
+
+## D-50 · O hold não consulta o calendário nem recebe duração; a confirmação confere de novo · S14
+
+**Hold.** O fim do atendimento vem do banco (`duration_override_min` ou a duração do
+serviço) — quem chama manda só o início. A checagem é a do motor (`db_occupation`, com os
+buffers de D-44), contra agendamentos ativos e holds vigentes. **Não** chama o `freebusy`:
+o calendário já foi consultado na oferta, e rede dentro do lock seguraria o profissional
+durante a retentativa (D-43). Antecedência mínima e horizonte também ficam na oferta; o
+hold recusa só horário no passado. A garantia de que o horário saiu do motor é o
+`slot_token` assinado (S15).
+
+**Confirmação**, nesta ordem: (1) `SELECT ... FOR UPDATE` no hold; (2) procura agendamento
+com `idempotency_key = sha256("hold:" + hold_id)` — achou, devolve o mesmo id, mesmo com o
+hold já consumido ou vencido; (3) hold não ativo ou vencido → `hold_expired`; (4) lock e
+checagem de novo, sem contar o próprio hold — pega o agendamento feito pelo painel em cima
+de um hold (inclusive só no buffer, que a constraint não vê); (5) `INSERT` num
+**savepoint**. Violação de `appt_no_overlap` (pelo nome da constraint ou pelo SQLSTATE
+`23P01`) vira `{"status": "slot_taken"}` e o hold é marcado `expired`. O `FOR UPDATE`
+antes da chave é o que faz duas confirmações simultâneas do mesmo hold darem uma linha só:
+a segunda espera a primeira e já encontra a chave.
+
+---
+
+## D-51 · O agendamento nasce `pending_sync`; o evento é de quem chama, depois do commit · S14
+
+`confirm_appointment` não fala com o Google. O agendamento entra com
+`sync_status = 'pending_sync'` e quem chama (a tool da S15) faz
+`push_appointment_event` **depois do commit**, fora do lock (D-43), que move para `synced`
+ou `sync_failed`. Se o processo morrer entre o commit e o push, a linha já diz que falta
+sincronizar — é o que o job de reprocessamento (S19/S20) vai procurar. Nascer `synced`
+(o default da coluna) mentiria nesse intervalo.
+
+---
+
+## D-52 · A expiração de hold entrou na S14, como limpeza · S14
+
+O `cron.py` previa a expiração na S19; o prompt da S14 a pede. `expire_holds_job` roda a
+cada minuto e marca `expired` todo hold ativo vencido, de todos os tenants
+(`bypass_rls_session`, D-03). É **limpeza, não correção**: toda leitura de ocupação já
+ignora hold com `expires_at <= now`, então um cron parado não prende horário — só deixa o
+índice parcial crescer e o painel mostrar reserva morta.
+
+---
+
+## D-53 · `testcontainers` instalado; o `redis` 8 que veio junto mudou um stub · S14
+
+O teste de concorrência (aceite da S14, 19.2) sobe um Postgres próprio com
+`testcontainers`, que estava nas dependências de dev mas não no venv. Instalar
+`testcontainers[postgres,redis]` resolveu `redis` para 8.1 — dentro do `redis>=5.2` do
+`pyproject.toml`, e é o que uma instalação limpa no CI também pega. O stub novo já tipa
+`llen` do cliente async como awaitable, e o `cast` de `ConversationAggregator.pending`
+virou `redundant-cast` no `mypy --strict`. O `cast` ficou, com
+`# type: ignore[redundant-cast, unused-ignore]`, que vale nas duas faixas de versão.
+
+---
+
 ## Pendências de verificação
 
 Todas fechadas. Estado verificado ao fim da Fase 0, contra Postgres 16 real:
@@ -1115,3 +1191,20 @@ Estado ao fim da S13, contra Postgres 16 e Redis reais:
 | Total: 676 testes, nenhum pulado | ✅ verde |
 | `ruff check` + `ruff format --check` | ✅ limpo |
 | `mypy --strict` | ✅ limpo (59 arquivos de `app`) |
+
+---
+
+Estado ao fim da S14, contra Postgres 16 e Redis reais:
+
+| Item | Estado |
+|---|---|
+| Migrations `0001`–`0005` | ✅ aplicadas — nenhuma nova: `holds`, `appointments`, `appt_no_overlap` e `uq_appointment_idempotency` já vinham da S02 |
+| `app/scheduling/booking.py` — `hold_slot`, `confirm_appointment`, `expire_holds` | ✅ 10 testes unitários + 16 de integração em `tests/integration/test_booking.py` |
+| Camada 3: `appt_no_overlap` traduzida para `slot_taken` | ✅ escrita concorrente sem lock, sem commit, segurando o `INSERT` da confirmação |
+| Aceite: 20 pedidos simultâneos ao mesmo slot → 1 agendamento (testcontainers) | ✅ `tests/integration/test_booking_concurrency.py`, 3 disputas (fluxo completo, holds furando a camada 1, mesmo hold 20 vezes) |
+| Aceite: confirmar de novo o mesmo hold → mesmo `appointment_id`, sem linha nova | ✅ em sequência e com 20 confirmações simultâneas |
+| Mutação: sem advisory lock no hold, 14 holds para o mesmo slot; sem a tradução, a `ExclusionViolationError` vaza | ✅ verificado, os testes caem |
+| `expire_holds_job` no cron (a cada minuto) | ✅ |
+| Total: 705 testes, nenhum pulado | ✅ verde |
+| `ruff check` + `ruff format --check` | ✅ limpo |
+| `mypy --strict` | ✅ limpo (60 arquivos de `app`) |

@@ -151,8 +151,9 @@ class ConversationAggregator:
         """Quantas partes estao no buffer agora. So para teste e diagnostico."""
         key = BUFFER_KEY.format(conversation_id=conversation_id)
         # `redis-py` tipa os comandos como sincronos ou assincronos conforme o cliente;
-        # no cliente async o retorno e sempre awaitable.
-        return await cast("Awaitable[int]", self._redis.llen(key))
+        # no cliente async o retorno e sempre awaitable. A partir do redis 8 o stub ja diz
+        # isso e o cast fica redundante; o ignore cobre as duas faixas de versao.
+        return await cast("Awaitable[int]", self._redis.llen(key))  # type: ignore[redundant-cast, unused-ignore]
 
     @staticmethod
     def _keys(conversation_id: uuid.UUID) -> list[str]:

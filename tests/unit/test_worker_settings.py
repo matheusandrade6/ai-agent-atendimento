@@ -56,8 +56,8 @@ def test_cada_fila_registra_so_os_seus_jobs() -> None:
     }
 
 
-def test_cron_sobe_mesmo_sem_job_de_negocio() -> None:
-    """O arq recusa worker sem nada registrado; o batimento mantem o cron de pe."""
+def test_cron_registra_batimento_e_expiracao_de_hold() -> None:
+    """O batimento mantem o cron de pe; a expiracao de hold e da S14 (13.4, camada 1)."""
     worker = create_worker(CronWorkerSettings)
 
-    assert [job.name for job in worker.cron_jobs] == ["cron:heartbeat"]
+    assert [job.name for job in worker.cron_jobs] == ["cron:heartbeat", "cron:expire_holds_job"]

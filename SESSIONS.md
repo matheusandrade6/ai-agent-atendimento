@@ -45,7 +45,7 @@ tenants, alucinação de horário/preço ou perda de mensagem**, use Opus.
 | S11 | Runner da suíte conversacional | 1 | **Opus** | S06, S08, S09 | ✅ feito |
 | S12 | `CalendarProvider` + Google (OAuth, freebusy, events) | 2 | **Opus** | S02 | ✅ feito |
 | S13 | Motor de disponibilidade | 2 | **Opus** | S12, S03 | ✅ feito |
-| S14 | Hold, advisory lock, confirmação idempotente | 2 | **Opus** | S13 | ⬜ |
+| S14 | Hold, advisory lock, confirmação idempotente | 2 | **Opus** | S13 | ✅ feito |
 | S15 | `slot_token` assinado + tools de escrita | 2 | Sonnet | S14 | ⬜ |
 | S16 | Fluxos de remarcação e cancelamento | 2 | Sonnet | S15 | ⬜ |
 | S17 | Painel: auth, caixa de conversas, takeover | 3 | Sonnet | S10 | ⬜ |
