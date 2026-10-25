@@ -901,6 +901,97 @@ existe ainda (cabe em S19/S20, junto do cron).
 
 ---
 
+## D-44 · O slot é o horário do atendimento; os buffers ocupam, mas não se gravam · S13
+
+**Contexto.** A 13.2 diz "candidato válido se `[t, t+duration_total]` ⊆ janela", sem dizer
+se `t` é o início do atendimento ou do bloco com buffers.
+
+**Decisão.** O slot oferecido (`Slot.start`/`end`) é o **atendimento**: é o que a pessoa
+lê e o que vai para o calendário. O bloco que precisa estar livre e dentro da janela é
+`[start - buffer_before, start + duração + buffer_after)` (`ServiceDuration.block_for`).
+A grade de passos parte do início da janela e anda sobre o horário do atendimento, então a
+oferta sai em hora redonda (08:15, não 08:10).
+
+**Contrato para a S14.** `appointments` e `holds` gravam o horário do atendimento, não o
+bloco. Ao ler a ocupação, o motor estende cada linha pelos buffers **do serviço dela**
+(join em `services`): o buffer de um atendimento já marcado protege o próximo.
+Consequência: `appt_no_overlap` protege o atendimento, não o buffer — buffer é regra do
+motor, não da rede final. Se um dia precisar ser rede final, a constraint passa a comparar
+um `tstzrange` estendido, e não muda o que se grava.
+
+---
+
+## D-45 · Borda de janela em horário de verão: o primeiro instante em que o relógio marca a hora · S13
+
+`app.scheduling.rules.local_to_utc` resolve as duas anomalias com uma regra só. Hora
+repetida (recuo): a primeira ocorrência. Hora que não existe (salto): o instante da
+transição — "abre às 02:30" num dia em que 02:00 vira 03:00 abre às 03:00, e "fecha às
+02:30" fecha às 03:00. A janela nunca ganha a hora que não existiu (invariante 1).
+
+Os candidatos andam em **tempo absoluto** a partir da borda já convertida: no salto,
+nenhum cai na hora inexistente; no recuo, a hora repetida aparece duas vezes, como dois
+instantes distintos (dedup é por instante UTC, não por hora local). São Paulo não tem mais
+horário de verão desde 2019, mas os testes usam 2018/2019 de São Paulo (meia-noite que
+pulava; 23h que repetia) e 2026 de Nova York — o código não sabe de país nenhum.
+
+---
+
+## D-46 · Formato de `working_hours`, `24:00` e jornada que atravessa a meia-noite · S13
+
+- `providers.working_hours` usa o formato da 10.4 (`weekly` + `exceptions`), validado pelo
+  mesmo `BusinessHours` do YAML; `timezone`, se vier, é ignorado — a timezone é da unidade.
+- **`{}` segue a unidade** (é o que os seeds já gravam). `{"exceptions": [...]}` sem
+  `weekly` também: são as férias de quem segue o horário da casa. Com `weekly`, dia ausente
+  é dia sem trabalho.
+- Horário de funcionamento: `locations.business_hours` quando não vazio; senão o
+  `business_hours` do YAML do tenant. A timezone vem de `locations.timezone`, ou do YAML
+  para profissional sem unidade.
+- `24:00` vale como **fim** de janela (o schema já aceitava pelo padrão `HH:MM`; o motor é
+  quem interpreta). Janelas que se encostam — inclusive `22:00-24:00` de um dia e
+  `00:00-02:00` do seguinte — viram uma só antes da varredura, então um atendimento de 3h
+  às 23h num turno 22h-02h cabe. O dia do slot é o **dia local** do início, nunca o UTC.
+
+---
+
+## D-47 · Recurso escasso: `service_resources` é lista de alternativas, com capacidade por pico · S13
+
+Um serviço ligado a N recursos precisa de **um** deles (`holds`/`appointments` têm um
+`resource_id` só). O primeiro livre, na ordem de nome, vai no `Slot.resource_id` para o
+hold usar. "Livre" é: nenhum bloqueio no calendário do recurso e pico de usos simultâneos
+dentro do bloco menor que `capacity` (dois usos em sequência numa sala de capacidade 1 não
+a lotam). O `freebusy` não diz quantos lugares estão tomados, então intervalo ocupado no
+calendário do recurso bloqueia a capacidade inteira. O recurso também precisa estar livre
+durante os buffers (preparo e limpeza ocupam a sala).
+
+Recurso de outra unidade não serve ao profissional — exceto em serviço `online`, que
+ignora `location` (13.3). Fora isso, `online` não muda a disponibilidade: jornada e
+horário de funcionamento valem igual; o link de videochamada no evento é da S15.
+
+---
+
+## D-48 · Preferência ordena, não filtra; falha de calendário fecha por profissional · S13
+
+**Preferências** (`Preferences`: turnos, dias da semana, faixa de horário, instante de
+referência) contam pontos de aderência; a ordem é (aderência, distância ao instante de
+referência — `now` se não houver). Preferência impossível não zera a oferta: o agente
+recebe os mais próximos e explica (cenário "preferência impossível", 19.3). Dois
+profissionais livres no mesmo instante: fica o de melhor aderência, depois o primeiro na
+ordem de nome. "Mais horários" (RF-17) é `offset` sobre a mesma ordenação.
+
+**Falha fechada por dono** (estende D-42). `CalendarQueryError` tira só os calendários que
+falharam; `CalendarSyncPending`/`CalendarAuthError` tiram o lote daquele cliente;
+`calendar_id` sem cliente resolvido é erro de configuração e também tira. Quem saiu volta
+em `AvailabilityResult.unavailable` com o motivo — o agente deve ler isso como "não
+consegui consultar", nunca como "não há vaga". Profissional sem `calendar_id` (agenda
+própria) conta só com o banco.
+
+**Fora da S13.** `slot_token` assinado é da S15, junto com a tool `check_availability`
+que embrulha `find_availability`; o `CalendarResolver` (qual cliente Google atende qual
+`credentials_ref`, e qual atende o calendário de um recurso) é decidido por quem monta a
+tool.
+
+---
+
 ## Pendências de verificação
 
 Todas fechadas. Estado verificado ao fim da Fase 0, contra Postgres 16 real:
@@ -1011,3 +1102,16 @@ Estado ao fim da S12:
 | `mypy app` | ✅ limpo (57 arquivos) |
 | Total: 580 testes, nenhum pulado, contra Postgres 16 e Redis reais | ✅ verde |
 
+---
+
+Estado ao fim da S13, contra Postgres 16 e Redis reais:
+
+| Item | Estado |
+|---|---|
+| Migrations `0001`–`0005` | ✅ aplicadas — nenhuma nova: o motor só lê |
+| `app/scheduling/rules.py` (regras da 13.3) | ✅ 27 testes em `tests/unit/test_scheduling_rules.py` |
+| `app/scheduling/availability.py` (algoritmo da 13.2) — bateria da 19.1 | ✅ 62 testes em `tests/unit/test_scheduling_availability.py`: horário de verão (salto e recuo, NY 2026 e SP 2018/2019), virada de dia, jornada partida, feriado e véspera, buffers, recurso escasso, serviço maior que a janela (vazio, e nenhum slot estoura a janela em 18 combinações) |
+| `find_availability` — ocupação do banco com buffers, hold vencido, cancelado, recurso entre profissionais, calendário sem resposta | ✅ 7 testes em `tests/integration/test_availability.py` |
+| Total: 676 testes, nenhum pulado | ✅ verde |
+| `ruff check` + `ruff format --check` | ✅ limpo |
+| `mypy --strict` | ✅ limpo (59 arquivos de `app`) |
