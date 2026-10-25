@@ -59,7 +59,8 @@ def _install_agent(ctx: WorkerContext, settings: Settings) -> None:
     agregacao, fila e webhook em desenvolvimento sem gastar token.
 
     Tools de leitura entram na S08 (`search_knowledge`, `list_services`); handoff na
-    S10 (`escalate_to_human` e `HandoffService`); tools de escrita de agendamento na S15.
+    S10 (`escalate_to_human` e `HandoffService`); tools de agendamento na S15, com o
+    `GoogleCalendarResolver` sobre o cliente HTTP do worker e o secret store do deploy.
 
     Os guardrails da S09 sao instalados sempre — nao ha modo "sem guardrail" em
     producao. O de entrada vai **sem** rate limiter: o anti-flood ja rodou em
@@ -76,13 +77,18 @@ def _install_agent(ctx: WorkerContext, settings: Settings) -> None:
     from app.agent.llm import AnthropicProvider
     from app.agent.runner import install
     from app.agent.tools.registry import build_registry
+    from app.calendar.resolver import GoogleCalendarResolver
+    from app.core.secrets import EnvSecretStore
 
     audit = PostgresAuditSink(settings)
+    calendars = GoogleCalendarResolver(settings, secrets=EnvSecretStore(), client=ctx["http"])
     install(
         ctx,
         AgentEngine(
             provider=AnthropicProvider.from_settings(settings),
-            tools=build_registry(embeddings=_embedding_provider(settings), settings=settings),
+            tools=build_registry(
+                embeddings=_embedding_provider(settings), settings=settings, calendars=calendars
+            ),
             audit=audit,
             max_iterations=settings.max_tool_iterations,
             input_guardrail=InputGuardrail(),

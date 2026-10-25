@@ -348,6 +348,7 @@ async def confirm_appointment(
     now: datetime,
     subject_id: uuid.UUID | None = None,
     intake: Mapping[str, Any] | None = None,
+    conversation_id: uuid.UUID | None = None,
 ) -> ConfirmResult:
     """Transforma o hold em agendamento, uma vez so.
 
@@ -355,12 +356,18 @@ async def confirm_appointment(
     com a chave do hold — repeticao devolve o mesmo id; (3) confere validade do hold;
     (4) advisory lock e checagem de novo, sem contar o proprio hold; (5) `INSERT` num
     savepoint, onde a `appt_no_overlap` e a ultima palavra.
+
+    `conversation_id`, quando informado, restringe a confirmacao ao hold **daquela**
+    conversa: a tool do agente o passa sempre, para um `hold_id` de outra conversa do mesmo
+    tenant nao ser confirmavel — nem reconhecivel, ja que devolve o mesmo `hold_not_found`
+    de um id que nao existe.
     """
     _require_aware(now=now)
+    owned = [Hold.tenant_id == tenant_id, Hold.id == hold_id]
+    if conversation_id is not None:
+        owned.append(Hold.conversation_id == conversation_id)
     hold = (
-        await session.execute(
-            select(Hold).where(Hold.tenant_id == tenant_id, Hold.id == hold_id).with_for_update()
-        )
+        await session.execute(select(Hold).where(*owned).with_for_update())
     ).scalar_one_or_none()
     if hold is None:
         return ConfirmResult(status="hold_not_found")

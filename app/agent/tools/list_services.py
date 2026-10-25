@@ -21,6 +21,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 
 from app.agent.tools.base import ToolContext, ToolResult, ToolSpec
+from app.agent.tools.common import price_line
 from app.core.config import Settings
 from app.core.db import tenant_session
 from app.domain.models import Service
@@ -75,19 +76,12 @@ def _matches(service: Service, query_norm: str) -> bool:
     return False
 
 
-def _price_line(service: Service) -> str:
-    if service.price_cents is not None:
-        reais = service.price_cents / 100
-        return f"R$ {reais:.2f}".replace(".", ",")
-    return service.price_note or ""
-
-
 def _service_dict(service: Service) -> dict[str, Any]:
     return {
         "id": str(service.id),
         "name": service.name,
         "duration_minutes": service.duration_minutes,
-        "price_line": _price_line(service),
+        "price_line": price_line(service),
         "modality": service.modality,
         "description": service.description or "",
     }
