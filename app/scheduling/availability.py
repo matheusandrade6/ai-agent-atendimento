@@ -74,6 +74,7 @@ __all__ = [
     "Slot",
     "UnknownService",
     "compute_slots",
+    "db_occupation",
     "find_availability",
 ]
 
@@ -342,7 +343,7 @@ def _expanded(starts_at: datetime, ends_at: datetime, before: int, after: int) -
     )
 
 
-async def _db_occupation(
+async def db_occupation(
     session: AsyncSession,
     tenant_id: uuid.UUID,
     *,
@@ -351,8 +352,13 @@ async def _db_occupation(
     start: datetime,
     end: datetime,
     now: datetime,
+    exclude_hold_id: uuid.UUID | None = None,
 ) -> tuple[dict[uuid.UUID, list[Interval]], dict[uuid.UUID, list[Interval]]]:
-    """Agendamentos ativos e holds vigentes (13.2, passos 2b e 2c), com buffers."""
+    """Agendamentos ativos e holds vigentes (13.2, passos 2b e 2c), com buffers.
+
+    Tambem e a checagem de sobreposicao do hold e da confirmacao (S14), que passam
+    `exclude_hold_id` para o hold sendo confirmado nao conflitar consigo mesmo.
+    """
     by_provider: dict[uuid.UUID, list[Interval]] = defaultdict(list)
     by_resource: dict[uuid.UUID, list[Interval]] = defaultdict(list)
     owner_filter_appt = [Appointment.provider_id.in_(provider_ids)]
@@ -360,6 +366,9 @@ async def _db_occupation(
     if resource_ids:
         owner_filter_appt.append(Appointment.resource_id.in_(resource_ids))
         owner_filter_hold.append(Hold.resource_id.in_(resource_ids))
+    hold_filters = [or_(*owner_filter_hold)]
+    if exclude_hold_id is not None:
+        hold_filters.append(Hold.id != exclude_hold_id)
 
     appointments = (
         select(
@@ -397,7 +406,7 @@ async def _db_occupation(
             Hold.expires_at > now,
             Hold.starts_at < end,
             Hold.ends_at > start,
-            or_(*owner_filter_hold),
+            *hold_filters,
         )
     )
     provider_set, resource_set = set(provider_ids), set(resource_ids)
@@ -510,7 +519,7 @@ async def find_availability(
     ]
     calendar_busy, unavailable = await _fetch_busy(owners, fetch_start, fetch_end)
 
-    provider_db, resource_db = await _db_occupation(
+    provider_db, resource_db = await db_occupation(
         session,
         tenant_id,
         provider_ids=[p.id for p, _ in provider_rows],
