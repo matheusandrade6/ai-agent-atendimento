@@ -253,7 +253,9 @@ class _Handler:
                 subject.attributes = {**subject.attributes, **info.attributes}
                 found: uuid.UUID = subject.id
                 return found
-        created = await session.scalar(
+        # Anotado: no SQLAlchemy 2.1 `scalar` devolve `Any` e o `mypy --strict` do CI recusa
+        # devolver `Any` de funcao que promete `UUID`. Na 2.0 o tipo ja vem certo.
+        created: uuid.UUID | None = await session.scalar(
             insert(Subject)
             .values(
                 tenant_id=ctx.tenant_id,
