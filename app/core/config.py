@@ -92,6 +92,11 @@ class Settings(BaseSettings):
     # --- seguranca ---
     secret_key: str = "dev-only-change-me"
     slot_token_secret: str = "dev-only-change-me"
+    # Quanto tempo a oferta de `check_availability` vale. Curto de proposito: o `hold_slot`
+    # nao reconsulta o calendario (D-50), entao uma oferta velha poderia reservar um horario
+    # que o profissional ja ocupou no Google. Resposta lenta do cliente? O modelo consulta de
+    # novo, e o custo e uma chamada de leitura.
+    slot_token_ttl_minutes: int = Field(default=30, ge=1, le=240)
 
     # --- limites globais (teto sobre o que o tenant configura) ---
     max_tool_iterations: int = 6

@@ -11,16 +11,30 @@ import json
 from typing import Any
 
 from app.agent.tools.base import ToolSpec
+from app.agent.tools.check_availability import check_availability_tool
+from app.agent.tools.confirm_appointment import confirm_appointment_tool
 from app.agent.tools.escalate_to_human import escalate_to_human_tool
+from app.agent.tools.find_appointments import find_appointments_tool
+from app.agent.tools.hold_slot import hold_slot_tool
 from app.agent.tools.list_services import list_services_tool
+from app.agent.tools.save_contact_info import save_contact_info_tool
 from app.agent.tools.search_knowledge import search_knowledge_tool
+from app.calendar.resolver import no_calendars
 from app.knowledge.embeddings import HashingEmbeddingProvider
 
 READ_TOOLS: tuple[ToolSpec, ...] = (
     list_services_tool(),
     search_knowledge_tool(HashingEmbeddingProvider()),
+    check_availability_tool(no_calendars),
+    find_appointments_tool(),
 )
-ALL_TOOLS: tuple[ToolSpec, ...] = (*READ_TOOLS, escalate_to_human_tool())
+WRITE_TOOLS: tuple[ToolSpec, ...] = (
+    escalate_to_human_tool(),
+    hold_slot_tool(),
+    confirm_appointment_tool(no_calendars),
+    save_contact_info_tool(),
+)
+ALL_TOOLS: tuple[ToolSpec, ...] = (*READ_TOOLS, *WRITE_TOOLS)
 
 
 def _assert_valid_json_schema(schema: dict[str, Any]) -> None:
@@ -63,13 +77,29 @@ def test_tools_de_leitura_sao_kind_read() -> None:
         assert tool.kind == "read"
 
 
-def test_escalate_to_human_e_kind_write() -> None:
-    assert escalate_to_human_tool().kind == "write"
+def test_tools_de_escrita_sao_kind_write() -> None:
+    for tool in WRITE_TOOLS:
+        assert tool.kind == "write", tool.name
 
 
 def test_nomes_batem_com_a_tabela_da_11_4() -> None:
     assert {tool.name for tool in ALL_TOOLS} == {
         "list_services",
         "search_knowledge",
+        "check_availability",
+        "find_appointments",
         "escalate_to_human",
+        "hold_slot",
+        "confirm_appointment",
+        "save_contact_info",
     }
+
+
+def test_argumentos_obrigatorios_existem_no_modelo_pydantic() -> None:
+    """O schema que o modelo le e o modelo que valida nao podem divergir."""
+    for tool in ALL_TOOLS:
+        if tool.args_model is None:
+            continue
+        fields = set(tool.args_model.model_fields)
+        assert set(tool.input_schema["properties"]) <= fields, tool.name
+        assert set(tool.input_schema.get("required", [])) <= fields, tool.name

@@ -1068,6 +1068,151 @@ virou `redundant-cast` no `mypy --strict`. O `cast` ficou, com
 
 ---
 
+## D-54 · `slot_token`: o corpo leva o horário; a conversa e o tenant entram na chave · S15
+
+`app/scheduling/slot_token.py`. Formato `base64url(corpo JSON).base64url(HMAC-SHA256)`; o
+corpo leva `provider_id`, `resource_id`, `service_id`, `starts_at` (UTC) e a validade. A
+assinatura cobre os bytes do segmento **como foram transmitidos**, não o JSON reserializado.
+
+**Tenant e conversa não vão no corpo — derivam a chave** (`HMAC(segredo, domínio | tenant |
+conversa)`). O mesmo corpo assinado para outra conversa ou outro tenant tem outra
+assinatura, então um token copiado de uma conversa para outra não vale, e não existe campo
+de tenant para alguém adulterar. Efeito colateral aceito: "adulterado" e "de outra conversa"
+dão o mesmo erro (`bad_signature`); o motivo só vai para o log (`slot_token_recusado`).
+
+A assinatura é conferida **antes** de qualquer interpretação do corpo, e os dois segmentos
+só aceitam o alfabeto do base64url: o decodificador do Python descarta caracteres soltos,
+o que daria várias formas válidas do mesmo token.
+
+**Validade:** `Settings.slot_token_ttl_minutes`, default 30. Curta de propósito: o
+`hold_slot` não reconsulta o calendário (D-50), então uma oferta velha poderia reservar um
+horário que o profissional já ocupou no Google. Cliente lento? O modelo consulta de novo —
+uma leitura. A validade é do instante da **oferta**, não do horário do slot.
+
+**Custo conhecido:** o token tem ~300 caracteres e o modelo o copia de volta. Um erro de
+cópia vira `invalid_slot_token`, recuperável com nova consulta. Encurtar (UUID em binário)
+é possível sem mudar o contrato, se a métrica mostrar recusas por cópia.
+
+---
+
+## D-55 · Instante ISO em resultado de tool é prova de horário; por isso não há `ends_at` · S15
+
+O guardrail de saída (`app.agent.temporal.evidence_from_tool_result`) lê **todo** instante
+ISO com offset de um `tool_result` como um horário que o modelo pode oferecer. Daí três
+desvios do contrato da 11.4, todos para o mesmo fim:
+
+- **Sem `ends_at` no slot.** O fim do atendimento das 18h30 seria prova de uma vaga às
+  19h00 que não existe. O slot traz `duration_minutes`.
+- **Sem `expires_at` no hold.** Um `expires_at` às 08:10 viraria prova de uma vaga às 08:10.
+  O hold traz `expires_in_minutes`.
+- Só o **início** do atendimento sai como instante ISO (`starts_at`), mais o `human`
+  (`quarta-feira, 9 de setembro, às 14h`, que a gramática temporal lê de volta).
+
+Regra para tool nova: instante ISO só para o que a pessoa pode ouvir como horário de
+atendimento. `tests/integration/test_tools_scheduling.py` amarra: os instantes do resultado
+são exatamente os `starts_at` oferecidos.
+
+Também em `check_availability`: `offset` (o "mais horários" da RF-17, que o motor já
+suportava); `limit` omitido vale `scheduling.slots_per_offer` e nunca passa dele; e
+`next_available_date` é a data do primeiro horário devolvido — ou, se a janela está vazia,
+a do primeiro depois dela até o horizonte do tenant (`null` se não há).
+
+---
+
+## D-56 · `hold_slot`: só o token; idempotente; troca em savepoint · S15
+
+A tool aceita **um** argumento, `slot_token`. Não há `provider_id`, `service_id` nem
+`starts_at` onde o modelo escrever um horário, e o que ele mandar além do schema é
+descartado pelo Pydantic antes do handler. Token recusado volta como `invalid_slot_token`
+**sem tocar o banco** (teste conta linhas em `holds`).
+
+- **Idempotente entre turnos.** Mesma (conversa, profissional, serviço, início) com reserva
+  vigente devolve a mesma reserva, sem estender o prazo — senão o "pode ser esse" do
+  cliente receberia `slot_taken` por causa do hold dele mesmo.
+- **Trocar de horário libera os anteriores da conversa, e a liberação é um savepoint.**
+  Achado pelo teste: 08:00 e 08:15 se sobrepõem (30 min + buffer), então a reserva antiga
+  da própria conversa bloqueava a nova. A liberação vem antes da tentativa e é desfeita se
+  a tentativa falha (`slot_taken`): quem pediu a troca não perde o que tinha.
+- `booking.confirm_appointment` (S14) ganhou `conversation_id` opcional. A tool o passa
+  sempre: `hold_id` de outra conversa do mesmo tenant responde `hold_not_found`, igual a um
+  id que não existe. Sem isso, qualquer um que obtivesse um `hold_id` o confirmaria.
+
+---
+
+## D-57 · `confirm_appointment`: banco primeiro, calendário depois, e a confirmação nunca perde o quando · S15
+
+**Duas fases** (resolve o "em aberto" da D-43). (1) transação do banco: hold vira
+agendamento sob o advisory lock; commit. (2) fora do lock, `push_appointment_event`.
+Falha do calendário **não** vira erro da tool: o agendamento existe e dizer "não consegui"
+faria o cliente tentar de novo ou desistir de uma reserva válida. `pending_sync` e
+`sync_failed` ficam na linha para o job de reprocessamento (S19/S20); o modelo não os vê.
+Exceção inesperada na fase 2 é engolida pelo mesmo motivo. Agenda própria (sem
+`calendar_id`) nasce `pending_sync` e é movida para `synced`: não há espelho a manter.
+Repetir a confirmação de agendamento não `synced` reenvia o evento (idempotente por
+`iCalUID`); de agendamento `synced`, não toca o calendário.
+
+**Falhas recuperáveis** (`hold_expired`, `slot_taken`, `hold_not_found`) voltam com
+`is_error=True` e `suggested_action` no formato da 11.4. Não é detalhe: `next_stage` só
+promove para `booked` tool que terminou bem, e o guardrail só lê horário de resultado que
+não é erro. Um `hold_expired` com `is_error=False` faria o funil registrar uma venda.
+
+**Subject:** resolve o subject do contato pelo nome (sem diferenciar caixa) quando há
+exatamente um; **não cria**. O tipo (pet, dependente) só `save_contact_info` recebe, e
+inventá-lo aqui gravaria dado errado. Sem subject cadastrado, o nome fica em
+`intake.subject_name`.
+
+**`intake`:** passa por `merge_collected` — só chaves que o tenant declara, valor vazio não
+apaga o que o motor já coletou. `notes` mora em `intake._notes` (`appointments` não tem
+coluna para observação).
+
+**`confirmation_message`** (D-38, ponto 4) é `messages.confirmation` preenchido com os
+campos do agendamento. Defeito encontrado ao construí-lo: o `confirmation` do tenant de
+exemplo é escrito com `>`, que dobra tudo numa linha, e `drop_unresolved` descarta por
+**frase** — um `{prep_line}` vazio apagava a mensagem inteira e sobrava `"Prontinho!"`, sem
+data nem hora. A tool tenta o caminho normal e, se ele comeu a data ou a hora que o
+template cita, refaz apagando só os campos opcionais vazios (preço, preparo, endereço).
+Template com um campo por linha (`|`) continua perdendo só a linha vazia. O mecanismo da
+S25 não foi alterado.
+
+---
+
+## D-58 · Resolver de calendário: um cliente por `credentials_ref`; recurso com calendário fica de fora · S15
+
+`app/calendar/resolver.py` responde a pergunta que a D-48 deixou para quem monta a tool.
+`GoogleCalendarResolver` guarda uma instância de `GoogleCalendarProvider` por
+`credentials_ref` (o cache de `freebusy` e o token moram nela, D-42) sobre o cliente HTTP do
+worker e o `EnvSecretStore`. Sem credencial, ou `calendar_provider != 'google'`: `None`, que
+o motor lê como "não consegui consultar", nunca como "livre".
+
+**`resources` não tem `credentials_ref`** (09) e a spec não diz com que conta o calendário
+de uma sala é lido. Escolher uma por palpite pode devolver "livre" para o que está ocupado.
+Decisão: recurso **com** `calendar_id` fica de fora (falha fechada, com aviso no log);
+recurso sem `calendar_id` (só o banco conta) funciona. **Pendência:** quando existir o
+vínculo (coluna `resources.credentials_ref` ou convenção), basta o resolver tratá-lo.
+
+`build_registry(calendars=...)` aceita o resolver; sem ele, `no_calendars` — só agenda
+própria aparece na oferta.
+
+---
+
+## D-59 · `save_contact_info` e `find_appointments` · S15
+
+**`save_contact_info`:** o contato é o da conversa (`ctx.contact_id`), nunca argumento.
+`attributes` é mesclado chave a chave (um turno que traz só a espécie não apaga a raça) e
+fechado na forma — chave `[a-z][a-z0-9_]{0,39}`, valor escalar de até 200 caracteres, no
+máximo 20 —, porque é o único lugar onde o modelo escreve JSON livre no banco. Documento,
+CNPJ e cartão são **recusados sem gravar nada**, com a mesma detecção do guardrail de saída
+(`redact_pii`, 18.2); só o tipo vai para o log, nunca o valor. O mesmo `subject` (tipo +
+nome, sem diferenciar caixa) é atualizado, não duplicado, e o nome gravado na primeira vez
+não é reescrito. Não toca `conversations.collected`: o motor o recalcula e o grava em
+`persist_turn`, então uma escrita da tool seria sobrescrita.
+
+**`find_appointments`:** sem argumentos. Futuros (`starts_at >= now`), ativos
+(`confirmed`/`rescheduled`) e do contato da conversa, até 10, do mais próximo ao mais
+distante. É de onde a S16 tira o `appointment_id`.
+
+---
+
 ## Pendências de verificação
 
 Todas fechadas. Estado verificado ao fim da Fase 0, contra Postgres 16 real:
@@ -1208,3 +1353,40 @@ Estado ao fim da S14, contra Postgres 16 e Redis reais:
 | Total: 705 testes, nenhum pulado | ✅ verde |
 | `ruff check` + `ruff format --check` | ✅ limpo |
 | `mypy --strict` | ✅ limpo (60 arquivos de `app`) |
+
+---
+
+Estado ao fim da S15, contra Postgres 16 e Redis reais:
+
+| Item | Estado |
+|---|---|
+| Migrations `0001`–`0005` | ✅ aplicadas — nenhuma nova: o fluxo usa `holds`, `appointments`, `subjects` e `contacts` como já estavam |
+| `slot_token` (`app/scheduling/slot_token.py`): adulterado, inventado, de outra conversa, de outro tenant, vencido, malformado | ✅ 37 testes unitários |
+| Aceite: `slot_token` adulterado é rejeitado — e **antes do banco** (zero linhas em `holds`) | ✅ `tests/integration/test_tools_scheduling.py` |
+| Aceite: `confirm_appointment` com hold expirado → `{"status": "hold_expired"}` com `suggested_action` | ✅ idem, sem agendamento criado |
+| Aceite: o modelo não agenda horário que não veio de `check_availability` | ✅ pelo **motor inteiro**: modelo roteirizado tenta horário escrito à mão, token inventado e hold inexistente — três erros, zero linhas, estágio não avança |
+| Fluxo completo pelo motor (check → hold → confirm → resposta) com o guardrail de saída ligado | ✅ resposta aprovada sem regeneração, estágio `booked`; horário fora da oferta é barrado e regenerado |
+| 5 tools (`check_availability`, `hold_slot`, `confirm_appointment`, `find_appointments`, `save_contact_info`) + resolver de calendário | ✅ 56 unitários + 57 de integração + 1 no `test_booking.py` |
+| Mutação: 9 quebras de propósito (assinatura, chave sem contexto, validade, dono do hold, falha como sucesso, confirmação dobrada, troca sem savepoint, `ends_at` e `expires_at` ISO) | ✅ as 9 derrubam teste |
+| Total: 859 testes (154 novos), nenhum pulado | ✅ verde |
+| `ruff check` + `ruff format --check` | ✅ limpo |
+| `mypy --strict` | ✅ limpo (68 arquivos de `app`) |
+
+**Não verificado, e por quê:**
+
+- **Google Calendar real.** O espelho foi testado contra um calendário falso com estado (o
+  contrato de `iCalUID` e `sync_status`). A S12 cobre o cliente HTTP com `respx`; a
+  composição das duas pontas com a API do Google nunca rodou.
+- **Modelo real.** O motor foi exercitado com modelo roteirizado. Que o modelo de verdade
+  copie o token sem erro e chame as tools na ordem certa só aparece com
+  `CONVERSATIONAL_LIVE=1` — e os cenários dessa suíte ainda usam **stubs** de
+  `check_availability` e `confirm_appointment` (D-36). Trocá-los pelo handler real muda a
+  contagem de asserções do placar (D-34) e ficou para decisão própria.
+- **Link de videochamada em serviço `online`** (13.3; a D-47 o atribuía à S15). Não
+  implementado: exige `conferenceData` no `EventDraft` e no `GoogleCalendarProvider`
+  (S12). Hoje o evento de serviço online sai sem link.
+- **Intake completo exigido em código no `confirm_appointment`.** Não implementado: as
+  chaves do intake (`service`, `contact_name`...) têm semântica do tenant, e exigi-las no
+  código pediria um vínculo entre chave e fato (serviço do hold, nome do contato) que não
+  está desenhado. Hoje a garantia é a do prompt, que recebe `missing` calculado em código.
+- **Calendário de recurso** (D-58): recurso com `calendar_id` fica fora da oferta.

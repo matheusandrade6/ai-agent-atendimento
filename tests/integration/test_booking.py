@@ -180,6 +180,29 @@ async def test_confirmar_hold_inexistente(seed: BookingSeed) -> None:
     assert (await confirm(seed, uuid.uuid4())).status == "hold_not_found"
 
 
+async def test_confirmar_hold_de_outra_conversa_nao_e_reconhecido(
+    seed: BookingSeed, sync_engine: sa.Engine
+) -> None:
+    """S15: a tool passa a conversa. Hold alheio responde igual a hold que nao existe."""
+    held = await hold(seed, at(14), conversation=0)
+    assert held.hold_id is not None
+
+    async def confirm_from(conversation: int) -> ConfirmResult:
+        async with tenant_session(seed.tenant) as session:
+            return await confirm_appointment(
+                session,
+                tenant_id=seed.tenant,
+                hold_id=held.hold_id,  # type: ignore[arg-type]
+                now=NOW,
+                conversation_id=seed.conversations[conversation],
+            )
+
+    assert (await confirm_from(1)).status == "hold_not_found"
+    assert appointments(sync_engine, seed.tenant) == 0
+    assert hold_status(sync_engine, seed.tenant, held.hold_id) == "active"  # intacto
+    assert (await confirm_from(0)).status == "confirmed"
+
+
 @pytest.mark.parametrize(
     ("case", "reason"),
     [
