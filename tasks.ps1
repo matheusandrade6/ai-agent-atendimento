@@ -33,6 +33,22 @@ function Assert-Venv {
     }
 }
 
+# O PowerShell 5.1 nao interrompe o script quando um comando nativo sai com codigo != 0:
+# `$ErrorActionPreference = "Stop"` so cobre erros do proprio PowerShell. Sem esta checagem,
+# `check` imprimia "Tudo verde." com teste falhando. Cada comando nativo que decide o
+# resultado passa por aqui, e o script para no primeiro que falhar.
+function Invoke-Step {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][scriptblock]$Command
+    )
+    $global:LASTEXITCODE = 0
+    & $Command
+    if ($LASTEXITCODE -ne 0) {
+        throw "$Name falhou (codigo de saida $LASTEXITCODE)."
+    }
+}
+
 function Assert-Docker {
     docker info *> $null
     if (-not $?) {
@@ -49,7 +65,7 @@ Se o servico estiver parado, um PowerShell como Administrador resolve:
 switch ($Task) {
     "up" {
         Assert-Docker
-        docker compose up -d postgres redis
+        Invoke-Step "docker compose up" { docker compose up -d postgres redis }
         Write-Host "`nPostgres em localhost:5433, Redis em localhost:6380" -ForegroundColor Green
     }
 
@@ -62,50 +78,50 @@ switch ($Task) {
             if ($exe) { py -3.12 -m venv .venv 2>$null; if (-not $?) { py -3.13 -m venv .venv } }
             else { python -m venv .venv }
         }
-        & $Py -m pip install --upgrade pip
-        & $Py -m pip install -e ".[dev]"
+        Invoke-Step "pip upgrade" { & $Py -m pip install --upgrade pip }
+        Invoke-Step "pip install" { & $Py -m pip install -e ".[dev]" }
     }
 
     "migrate" {
         Assert-Venv
-        & $Py -m alembic upgrade head
+        Invoke-Step "alembic" { & $Py -m alembic upgrade head }
     }
 
     "test" {
         Assert-Venv
-        & $Py -m pytest
+        Invoke-Step "pytest" { & $Py -m pytest }
     }
 
     "conv" {
         # A 19.4 manda rodar a suite inteira a cada mudanca de prompt. Ela nao precisa
         # de docker nem de chave de API.
         Assert-Venv
-        & $Py -m pytest -m conversational
+        Invoke-Step "pytest conversacional" { & $Py -m pytest -m conversational }
     }
 
     "lint" {
         Assert-Venv
-        & $Py -m ruff check app tests migrations
-        & $Py -m ruff format --check app tests migrations
-        & $Py -m mypy app
+        Invoke-Step "ruff check" { & $Py -m ruff check app tests migrations }
+        Invoke-Step "ruff format" { & $Py -m ruff format --check app tests migrations }
+        Invoke-Step "mypy" { & $Py -m mypy app }
     }
 
     "fmt" {
         Assert-Venv
-        & $Py -m ruff check --fix app tests migrations
-        & $Py -m ruff format app tests migrations
+        Invoke-Step "ruff check --fix" { & $Py -m ruff check --fix app tests migrations }
+        Invoke-Step "ruff format" { & $Py -m ruff format app tests migrations }
     }
 
     "check" {
         Assert-Venv
         Write-Host "== migrations ==" -ForegroundColor Cyan
-        & $Py -m alembic upgrade head
+        Invoke-Step "alembic" { & $Py -m alembic upgrade head }
         Write-Host "`n== testes ==" -ForegroundColor Cyan
-        & $Py -m pytest
+        Invoke-Step "pytest" { & $Py -m pytest }
         Write-Host "`n== lint e tipos ==" -ForegroundColor Cyan
-        & $Py -m ruff check app tests migrations
-        & $Py -m ruff format --check app tests migrations
-        & $Py -m mypy app
+        Invoke-Step "ruff check" { & $Py -m ruff check app tests migrations }
+        Invoke-Step "ruff format" { & $Py -m ruff format --check app tests migrations }
+        Invoke-Step "mypy" { & $Py -m mypy app }
         Write-Host "`nTudo verde." -ForegroundColor Green
     }
 

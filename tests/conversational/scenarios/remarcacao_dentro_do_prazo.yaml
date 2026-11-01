@@ -1,0 +1,74 @@
+# Fluxo da 12.2: achar o agendamento, consultar o MESMO servico, remarcar com o slot_token.
+# `find_appointments` e `reschedule_appointment` carregam o contrato de producao (schema e
+# validacao de argumentos); o resultado e o do stub. `check_availability` e stub do cenario.
+# Aqui a consulta e amanha (mais de 4h), entao `can_reschedule` e verdadeiro e nada escala.
+scenario: remarcacao_dentro_do_prazo
+tenant: clinica-exemplo
+description: >
+  Cliente pede para mudar a consulta de amanhã. O agente acha o agendamento, oferece só
+  horários que a agenda devolveu e, escolhido um, remarca. A resposta final cita o horário
+  novo — que veio do resultado da tool — e nunca o antigo.
+
+now: "2026-09-08T10:00:00"
+
+tools:
+  - name: find_appointments
+    result:
+      count: 1
+      appointments:
+        - appointment_id: "0b8f6d1e-5a62-4c7e-9a31-6c2f1d9e7a10"
+          service_id: "consulta"
+          service: "Consulta clínica"
+          subject_name: "Mia"
+          starts_at: "@+1 14:30"
+          human: "quarta-feira, 9 de setembro, às 14h30"
+          provider_name: "Dra. Ana"
+          status: confirmed
+          can_reschedule: true
+          can_cancel: true
+  - name: check_availability
+    description: "Horarios livres para o servico, no periodo pedido."
+    slots: ["+3 14:00", "+3 16:00"]
+  - name: reschedule_appointment
+    results:
+      - result:
+          status: rescheduled
+          appointment_id: "5d2c9b44-7e0a-4f6b-8c15-3a9e0d7b6f21"
+          previous_appointment_id: "0b8f6d1e-5a62-4c7e-9a31-6c2f1d9e7a10"
+          service: "Consulta clínica"
+          subject_name: "Mia"
+          starts_at: "@+3 16:00"
+          human: "sexta-feira, 11 de setembro, às 16h"
+          provider_name: "Dra. Ana"
+          address: "Rua Exemplo, 123"
+          price_line: ""
+          prep_line: ""
+          message: "Remarcado. O horario antigo foi liberado. Confirme o novo horario."
+
+turns:
+  - user: "preciso mudar minha consulta de amanhã pra sexta, de tarde"
+    agent:
+      - call: find_appointments
+      - call: check_availability
+        arguments: { service_id: "consulta", date_from: "2026-09-11", date_to: "2026-09-11" }
+      - say: "Tenho sexta-feira, 11 de setembro, às 14h. Ou às 16h, no mesmo dia. Qual prefere?"
+    expect:
+      tools_called: [find_appointments, check_availability]
+      no_tool_called: [reschedule_appointment, escalate_to_human]
+      response_contains_any: ["14h"]
+      handoff_opened: false
+
+  - user: "pode ser às 16h"
+    agent:
+      - call: reschedule_appointment
+        arguments:
+          appointment_id: "0b8f6d1e-5a62-4c7e-9a31-6c2f1d9e7a10"
+          slot_token: "token-das-16h"
+      - say: "Pronto, remarquei sua consulta para sexta-feira, 11 de setembro, às 16h."
+    expect:
+      tools_called: [reschedule_appointment]
+      no_tool_called: [escalate_to_human]
+      response_contains_any: ["16h"]
+      response_excludes_any: ["14h30"]
+      stage: booked
+      handoff_opened: false

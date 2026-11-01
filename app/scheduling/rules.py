@@ -13,6 +13,8 @@ o motor (`app.scheduling.availability`) junta as pecas.
 | Feriados e excecoes       | `WeeklySchedule.exceptions`                    |
 | Recurso escasso           | `fits_capacity`                                |
 | Servico online            | `uses_location`                                |
+| Antecedencia p/ remarcar  | `ChangePolicy.verdict` (12.2, 12.3)            |
+| Antecedencia p/ cancelar  | `ChangePolicy.verdict`                         |
 
 Hora local e instante
 ---------------------
@@ -44,6 +46,9 @@ from app.domain.tenant_config import (
 
 __all__ = [
     "PERIOD_BOUNDS",
+    "ChangeKind",
+    "ChangePolicy",
+    "ChangeVerdict",
     "LocalWindow",
     "Period",
     "Preferences",
@@ -110,6 +115,47 @@ class SchedulingPolicy:
 
     def first_day(self, now: datetime, timezone_name: str) -> date:
         return (now + self.min_lead).astimezone(tz_of(timezone_name)).date()
+
+
+ChangeKind = Literal["reschedule", "cancel"]
+ChangeVerdict = Literal["ok", "too_late", "not_allowed"]
+
+
+@dataclass(frozen=True, slots=True)
+class ChangePolicy:
+    """`allow_*` e `*_min_notice_hours` de `scheduling` (10.3), aplicados a um agendamento.
+
+    A decisao e do codigo, nao do modelo: "abaixo do minimo escala" (12.2, 12.3) so vale se
+    quem le o relogio nao for a conversa. O minimo e **inclusivo** — faltando exatamente
+    `min_notice`, a mudanca passa; so o que fica abaixo vai para um humano. Agendamento que
+    ja comecou nunca passa, mesmo com `min_notice = 0`.
+    """
+
+    allow_reschedule: bool
+    reschedule_min_notice: timedelta
+    allow_cancel: bool
+    cancel_min_notice: timedelta
+
+    @classmethod
+    def from_rules(cls, rules: SchedulingRules) -> Self:
+        return cls(
+            allow_reschedule=rules.allow_reschedule,
+            reschedule_min_notice=timedelta(hours=rules.reschedule_min_notice_hours),
+            allow_cancel=rules.allow_cancel,
+            cancel_min_notice=timedelta(hours=rules.cancel_min_notice_hours),
+        )
+
+    def verdict(self, kind: ChangeKind, starts_at: datetime, now: datetime) -> ChangeVerdict:
+        allowed, minimum = (
+            (self.allow_reschedule, self.reschedule_min_notice)
+            if kind == "reschedule"
+            else (self.allow_cancel, self.cancel_min_notice)
+        )
+        if not allowed:
+            return "not_allowed"
+        if starts_at <= now or starts_at - now < minimum:
+            return "too_late"
+        return "ok"
 
 
 # ------------------------------------ duracao ------------------------------------

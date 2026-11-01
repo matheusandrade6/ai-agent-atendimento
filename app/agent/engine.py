@@ -84,7 +84,14 @@ from app.agent.prompt import (
     build_system_prompt,
 )
 from app.agent.temporal import gather_evidence
-from app.agent.tools.base import ToolContext, ToolError, ToolRegistry, ToolResult, ToolSpec
+from app.agent.tools.base import (
+    NEEDS_HUMAN,
+    ToolContext,
+    ToolError,
+    ToolRegistry,
+    ToolResult,
+    ToolSpec,
+)
 from app.core.telemetry import get_logger, log_context
 from app.domain.tenant_config import TenantConfig
 
@@ -732,17 +739,24 @@ def _placeholders(request: TurnRequest) -> dict[str, str]:
 
 
 def _tool_escalation_reason(calls: Sequence[ToolInvocation]) -> str | None:
-    """Motivo da escalada quando o proprio modelo chamou `escalate_to_human` (RF-26).
+    """Motivo da escalada pedida por uma tool (RF-26).
 
-    Sem isto, o turno so escala por disjuntor, teto de iteracoes ou segunda falha do
-    guardrail de saida — nunca porque o modelo decidiu que precisava de um humano. O
-    prefixo `tool:` distingue esta origem das demais para `app.agent.handoff` decidir
-    `triggered_by` sem precisar reabrir o resultado da tool.
+    Duas origens, com prefixos distintos para `app.agent.handoff` decidir `triggered_by`
+    sem reabrir o resultado:
+
+    - `tool:` — o proprio modelo chamou `escalate_to_human`.
+    - `policy:` — uma tool recusou por regra e devolveu `status: needs_human` (D-60):
+      antecedencia minima para remarcar/cancelar, politica do tenant, falha com rollback.
+      A escalada nao depende de o modelo lembrar de pedi-la; o resultado e erro
+      (`ok=False`), por isso este ramo olha as chamadas que falharam tambem.
     """
     for call in calls:
         if call.ok and call.name == "escalate_to_human":
             reason = call.result.get("reason") if isinstance(call.result, Mapping) else None
             return f"tool:{reason}" if reason else "tool:escalate_to_human"
+    for call in calls:
+        if isinstance(call.result, Mapping) and call.result.get("status") == NEEDS_HUMAN:
+            return f"policy:{call.result.get('reason') or call.name}"
     return None
 
 

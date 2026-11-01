@@ -127,13 +127,17 @@ def _notification_text(reason: str, summary: str) -> str:
 def triggered_by_for(reason: str | None) -> str:
     """Deriva `handoffs.triggered_by` do motivo do turno (`CheckConstraint handoff_source`).
 
-    `tool:` e o modelo decidindo por conta propria (`escalate_to_human`); `trigger:` e um
-    gatilho de entrada casando com o que a pessoa escreveu — o disparo e do sistema, mas a
-    origem e o que o contato disse, por isso 'contact'; o resto (disjuntor de custo/
-    mensagens, teto de iteracoes, segunda falha do guardrail de saida) e o processo do
-    agente tropecando na propria regra, sem um gatilho de config por tras.
+    `tool:` e o modelo decidindo por conta propria (`escalate_to_human`); `policy:` e uma
+    tool recusando por regra — antecedencia minima, politica do tenant (D-60) —, e a regra
+    e do sistema, por isso 'rule'; `trigger:` e um gatilho de entrada casando com o que a
+    pessoa escreveu — o disparo e do sistema, mas a origem e o que o contato disse, por
+    isso 'contact'; o resto (disjuntor de custo/mensagens, teto de iteracoes, segunda falha
+    do guardrail de saida) e o processo do agente tropecando na propria regra, sem um
+    gatilho de config por tras.
     """
     if reason is None:
+        return "rule"
+    if reason.startswith("policy:"):
         return "rule"
     if reason.startswith("tool:"):
         return "agent"

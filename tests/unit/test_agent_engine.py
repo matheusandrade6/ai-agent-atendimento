@@ -29,7 +29,14 @@ from app.agent.engine import (
     next_stage,
 )
 from app.agent.memory import StoredMessage
-from app.agent.tools.base import ToolContext, ToolError, ToolRegistry, ToolResult, ToolSpec
+from app.agent.tools.base import (
+    NEEDS_HUMAN,
+    ToolContext,
+    ToolError,
+    ToolRegistry,
+    ToolResult,
+    ToolSpec,
+)
 from app.domain.tenant_config import TenantConfig, load_tenant_config
 from tests.fakes import RecordingTool, ScriptedProvider, text_response, tool_response
 
@@ -444,6 +451,103 @@ async def test_escalate_to_human_que_falhou_nao_escala(config: TenantConfig) -> 
     assert outcome.escalation_reason is None
 
 
+# ------------------------- handoff por regra da tool (S16, D-60) -------------------------
+
+
+def refusing_tool(name: str = "cancel_appointment", **result: object) -> RecordingTool:
+    """Uma tool que recusa por regra, como `cancel_appointment` abaixo da antecedencia minima."""
+    content: dict[str, object] = {
+        "status": NEEDS_HUMAN,
+        "reason": "cancelamento_fora_do_prazo",
+        "message": "Faltam poucas horas.",
+        **result,
+    }
+    return RecordingTool(name=name, kind="write", result=content)
+
+
+async def test_tool_que_devolve_needs_human_escala_mesmo_sem_o_modelo_pedir(
+    config: TenantConfig,
+) -> None:
+    """A escalada e decidida pela regra: o modelo nunca chamou `escalate_to_human`."""
+    tool = refusing_tool()
+    provider = ScriptedProvider(
+        script=[
+            tool_response("cancel_appointment", {}),
+            text_response("Vou chamar alguem da equipe para te ajudar."),
+        ]
+    )
+
+    outcome = await make_engine(provider, tool.spec()).run_turn(make_request(config))
+
+    assert outcome.escalate is True
+    assert outcome.escalation_reason == "policy:cancelamento_fora_do_prazo"
+    assert outcome.stage == "handoff"
+    assert outcome.used_tools == ("cancel_appointment",)
+    assert outcome.reply == "Vou chamar alguem da equipe para te ajudar."
+
+
+async def test_needs_human_de_tool_que_falhou_tambem_escala(config: TenantConfig) -> None:
+    """O resultado de `needs_human` e erro (nada foi feito), e nem por isso deixa de escalar."""
+    from app.agent.tools.common import needs_human
+
+    async def handler(ctx: ToolContext, arguments: Mapping[str, Any]) -> ToolResult:
+        return needs_human("remarcacao_fora_do_prazo", "Faltam poucas horas.")
+
+    spec = ToolSpec(
+        name="reschedule_appointment",
+        description="x",
+        input_schema={"type": "object", "properties": {}},
+        handler=handler,
+        kind="write",
+    )
+    provider = ScriptedProvider(
+        script=[tool_response("reschedule_appointment", {}), text_response("A equipe te ajuda.")]
+    )
+
+    outcome = await make_engine(provider, spec).run_turn(make_request(config))
+
+    assert outcome.tool_calls[0].ok is False
+    assert outcome.escalate is True
+    assert outcome.escalation_reason == "policy:remarcacao_fora_do_prazo"
+    assert outcome.stage == "handoff"
+
+
+async def test_falha_comum_de_tool_nao_escala(config: TenantConfig) -> None:
+    """`slot_taken` e corrida normal: o modelo reoferece, ninguem e chamado."""
+    tool = RecordingTool(
+        name="reschedule_appointment",
+        kind="write",
+        result={"status": "slot_taken", "message": "ocupado"},
+    )
+    provider = ScriptedProvider(
+        script=[tool_response("reschedule_appointment", {}), text_response("Vou ver outros.")]
+    )
+
+    outcome = await make_engine(provider, tool.spec()).run_turn(make_request(config))
+
+    assert outcome.escalate is False
+    assert outcome.escalation_reason is None
+
+
+async def test_pedido_explicito_ao_modelo_ganha_da_regra_no_motivo(config: TenantConfig) -> None:
+    from app.agent.tools.escalate_to_human import escalate_to_human_tool
+
+    provider = ScriptedProvider(
+        script=[
+            tool_response("cancel_appointment", {}),
+            tool_response("escalate_to_human", {"category": "outro", "reason": "cliente pediu"}),
+            text_response("A equipe continua daqui."),
+        ]
+    )
+
+    outcome = await make_engine(
+        provider, refusing_tool().spec(), escalate_to_human_tool()
+    ).run_turn(make_request(config))
+
+    assert outcome.escalate is True
+    assert outcome.escalation_reason == "tool:cliente pediu"
+
+
 # --------------------------------- estagio ---------------------------------
 
 
@@ -456,6 +560,7 @@ async def test_escalate_to_human_que_falhou_nao_escala(config: TenantConfig) -> 
         ("offering", ("hold_slot",), True, "confirming"),
         ("confirming", ("confirm_appointment",), True, "booked"),
         ("booked", ("reschedule_appointment",), True, "booked"),
+        ("booked", ("find_appointments", "cancel_appointment"), True, "answering"),
         ("qualifying", ("escalate_to_human",), False, "handoff"),
         ("answering", (), False, "answering"),
     ],

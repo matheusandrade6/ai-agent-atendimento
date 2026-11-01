@@ -1,0 +1,51 @@
+# 12.3 com a politica de antecedencia: a consulta e daqui a 2h e o tenant exige 4h para
+# cancelar. O modelo nao pede confirmacao de algo que nao sera feito: `cancel_appointment`
+# devolve `needs_human` ja na primeira chamada e o motor abre o handoff (D-60).
+scenario: cancelamento_fora_do_prazo
+tenant: clinica-exemplo
+description: >
+  Cliente quer cancelar uma consulta que é daqui a pouco. Abaixo da antecedência mínima a
+  conversa vai para a equipe, sem pedir confirmação e sem cancelar nada.
+
+now: "2026-09-08T10:00:00"
+
+tools:
+  - name: find_appointments
+    result:
+      count: 1
+      appointments:
+        - appointment_id: "0b8f6d1e-5a62-4c7e-9a31-6c2f1d9e7a10"
+          service_id: "consulta"
+          service: "Consulta clínica"
+          subject_name: "Mia"
+          starts_at: "@hoje 12:00"
+          human: "terça-feira, 8 de setembro, às 12h"
+          provider_name: "Dra. Ana"
+          status: confirmed
+          can_reschedule: false
+          can_cancel: false
+  - name: cancel_appointment
+    results:
+      - error: true
+        result:
+          status: needs_human
+          reason: cancelamento_fora_do_prazo
+          message: "Faltam menos horas para o atendimento do que a politica da casa exige."
+          suggested_action: "tell the customer that someone from the team will take over"
+
+turns:
+  - user: "quero cancelar a consulta de hoje, surgiu um imprevisto"
+    agent:
+      - call: find_appointments
+      - call: cancel_appointment
+        arguments: { appointment_id: "0b8f6d1e-5a62-4c7e-9a31-6c2f1d9e7a10" }
+      - say: "Entendi. Como a consulta é daqui a pouco, quem cuida disso é a equipe. Já avisei alguém para falar com você."
+    expect:
+      tools_called: [find_appointments, cancel_appointment]
+      no_tool_called: [escalate_to_human]
+      handoff_opened: true
+      handoff_reason: cancelamento_fora_do_prazo
+      max_turns_to_escalate: 1
+      response_contains_any: ["equipe"]
+      response_excludes_any: ["confirma"]
+      stage: handoff

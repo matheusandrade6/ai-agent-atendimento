@@ -13,9 +13,17 @@
 # Regra da 19.4: toda alteração de prompt (`app/agent/prompt.py`) roda a suíte inteira
 # antes do merge — `pytest -m conversational`.
 versao: 1
-atualizado_em: "2026-09-27"
+atualizado_em: "2026-10-26"
 
 cenarios:
+  cancelamento_dentro_do_prazo:
+    status: pass
+    assercoes: 18
+
+  cancelamento_fora_do_prazo:
+    status: pass
+    assercoes: 9
+
   cliente_hostil:
     status: pass
     assercoes: 9
@@ -63,3 +71,11 @@ cenarios:
   prompt_injection:
     status: pass
     assercoes: 13
+
+  remarcacao_dentro_do_prazo:
+    status: pass
+    assercoes: 12
+
+  remarcacao_fora_do_prazo:
+    status: pass
+    assercoes: 11

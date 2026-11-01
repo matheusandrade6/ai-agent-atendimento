@@ -1213,6 +1213,149 @@ distante. É de onde a S16 tira o `appointment_id`.
 
 ---
 
+## D-60 · Recusa por regra vira `needs_human`, e o motor escala no mesmo turno · S16
+
+**Contexto.** A 12.2 e a 12.3 dizem "abaixo do mínimo → escala". Com a D-32 como base, a
+única porta do handoff é `TurnOutcome.escalate`; mas `escalate_to_human` depende de o modelo
+lembrar de chamá-la, e uma regra de antecedência que só vale se o modelo cooperar não é
+regra (invariante 1).
+
+**Decisão.** Uma tool que recusa por regra devolve `{"status": "needs_human", "reason": ...}`
+com `is_error=True` (nada foi feito: o funil não anda, o guardrail não lê o resultado como
+prova de horário). `AgentEngine._tool_escalation_reason` lê esse `status` — **inclusive de
+chamada que falhou** — e escala com o motivo `policy:<reason>`; `triggered_by_for` mapeia o
+prefixo para `rule` (a regra do sistema recusou, o modelo não decidiu). Os rótulos fechados:
+`remarcacao_fora_do_prazo`, `remarcacao_nao_permitida`, `cancelamento_fora_do_prazo`,
+`cancelamento_nao_permitido`, `falha_ao_remarcar`. O modelo só redige o aviso
+(`HAND_OFF_NOTICE`: avisar que a equipe assume, sem prometer desfecho).
+
+**A regra mora em `rules.ChangePolicy`**, pura como o resto de 13.3: o mínimo é **inclusivo**
+(faltando exatamente 4h passa, 3h59 escala) e agendamento que já começou nunca passa, nem com
+`*_min_notice_hours: 0`. É conferida com a linha travada em `booking.reschedule_appointment`
+e `booking.cancel_appointment`, não na tool — entre a leitura e a escrita o relógio anda.
+`allow_reschedule: false` e `allow_cancel: false` também escalam: a casa que desliga a ação
+por conversa quer que uma pessoa decida, não que o cliente fique sem resposta.
+
+**O modelo sabe antes de oferecer horário.** `find_appointments` devolve `can_reschedule` e
+`can_cancel` (a mesma `ChangePolicy`) e `service_id` (para o `check_availability` do mesmo
+serviço). Para quem não pode, o `slot_token` de `reschedule_appointment` é **opcional**: sem
+ele a tool só decide a política — o modelo nunca viu horário, então não tem token, e fabricar
+um é justamente o que a D-54 impede. Com a política ok e sem token, devolve
+`slot_token_required`.
+
+**O texto para o modelo não leva número de horas.** "4 horas" na boca do modelo seria lido
+pelo guardrail de saída como um horário (D-55); o número fica na config e na base de
+conhecimento, de onde o RAG o tira se a pessoa perguntar.
+
+**`slot_taken` não escala.** É corrida normal: o agendamento atual segue valendo e o modelo
+reoferece. Só vai para a equipe o que o modelo não consegue contornar.
+
+---
+
+## D-61 · Remarcação: troca num savepoint, `rescheduled` no novo, e o "rollback" do calendário é compensação · S16
+
+**Banco.** `booking.reschedule_appointment` cancela o antigo e cria o novo **num savepoint**:
+os dois ou nenhum. O antigo é cancelado *antes* do teste de conflito — remarcar 08:00 → 08:15
+se sobrepõe ao próprio agendamento (30 min + buffer), e um teste com o antigo ainda ativo daria
+`slot_taken` falso. Se o horário novo esbarra em alguém (teste do hold ou `appt_no_overlap`),
+o savepoint volta e o antigo fica como estava. O novo nasce `rescheduled` (um dos dois status
+ativos da constraint) e `pending_sync`; o antigo vira `cancelled` com
+`cancellation = {kind, by, via, at, conversation_id, previous_status, replaced_by}` e o novo
+guarda `intake._rescheduled_from`. As reservas ativas da conversa expiram na troca (o horário
+veio do token, não de um hold) e voltam se a troca falha. A chave de idempotência é
+`hash(antigo, profissional, recurso, início)`: repetir devolve o mesmo agendamento, e o
+antigo, já cancelado, não atrapalha a repetição. A validação do horário (`_plan_slot`) é a
+mesma do `hold_slot`, extraída para as duas usarem.
+
+**Calendário — o que a 12.2 chama de rollback.** Fora do lock, depois do commit (D-43).
+Mesmo calendário: `update_event` move **o mesmo evento** (preserva o que o profissional
+anotou nele) e o `external_event_id` passa do antigo para o novo. Outro calendário: cria o
+evento novo e apaga o antigo. Diferença para a D-57 (confirmação), que não desfaz nada: lá o
+pior caso é "sem evento"; aqui o evento **já existe** no horário antigo, e se ele não anda o
+profissional espera o cliente na hora errada. Então, **havendo evento anterior que não pôde
+ser movido**, `booking.revert_reschedule` cancela o novo e reativa o antigo (com o status que
+ele tinha), e a conversa escala (`falha_ao_remarcar`, `original_kept: true`). Sem evento
+anterior (agenda própria, sincronização pendente), a falha de calendário degrada como na
+confirmação: `pending_sync`, a remarcação fica. Se alguém ocupou o horário antigo entre o
+commit e a reversão, o antigo **não** é reativado — seria overbooking (invariante 6): fica
+cancelado, o resultado diz `original_kept: false` e o modelo é instruído a não afirmar qual
+horário vale.
+
+**Não reaproveita `messages.confirmation`.** O template do tenant diz "Prontinho! ✅
+agendado…"; para remarcação o resultado leva só os fatos (`human`, `provider_name`,
+`address`, `price_line`, `prep_line`) e o modelo redige.
+
+**Limitações conhecidas.**
+
+- `check_availability` não conhece o agendamento que está sendo movido, então não oferece
+  horário que se sobreponha ao próprio bloco (08:00 + 10 min de buffer → o mais cedo é
+  08:45). O domínio aceita 08:15 (teste direto); a oferta é que não o devolve.
+- Depois de um `update_event`, o `iCalUID` e `extendedProperties.private.appointment_id` do
+  evento continuam sendo os do agendamento **antigo**. O sync reverso (S20) precisa casar
+  evento e agendamento por `external_event_id` (índice `ix_appointments_external_event`), não
+  por `iCalUID`.
+
+---
+
+## D-62 · Cancelamento em dois turnos é do código: `confirmation_token` · S16
+
+"Nunca cancela em uma mensagem só" (12.3) não pode ser uma instrução ao modelo. A primeira
+chamada de `cancel_appointment` (só `appointment_id`) **não cancela**: confere a política e
+devolve `confirmation_required` com um `confirmation_token`; o modelo pergunta e o turno
+acaba. O token (`app/scheduling/confirmation_token.py`) é HMAC como o `slot_token` — chave
+derivada de (tenant, conversa), domínio próprio, agendamento assinado dentro do corpo — e só
+vale com `now` **estritamente depois** de quando foi emitido, isto é, em outro turno. Turno só
+existe porque o cliente escreveu, então "outro turno" é "o cliente respondeu". No mesmo
+turno: `confirmation_pending`. Vencido (`confirmation_token_ttl_minutes`, 30), de outro
+agendamento, outra conversa ou outro tenant: `invalid_confirmation_token` e a instrução de
+perguntar de novo.
+
+**O que o código não lê** é se a resposta foi "sim" ou "não". Esse é o único elo da
+confirmação que continua fora do código — e é por isso que a descrição da tool e o bloco
+`[LIMITES INEGOCIÁVEIS]` ("Cancelar exige a confirmação do cliente") existem também.
+
+A política é conferida **nas duas chamadas**: na primeira, para não pedir confirmação de algo
+que não será feito; na segunda, porque o prazo pode ter fechado entre a pergunta e a resposta.
+
+**Calendário e lista de espera.** O evento é apagado depois do commit; falha não desfaz o
+cancelamento (o cliente pediu, o banco manda — D-57): `pending_sync`, ou `sync_failed` sem
+credencial. Com `waitlist_enabled`, o horário liberado vai para `on_slot_released`
+(`SlotReleased`: tenant, profissional, recurso, serviço, início, fim), uma vez por
+cancelamento. **O consumidor ainda não existe** — o job de encaixe é da Fase 3 (RF-25) — então
+`build_registry` aceita o gancho e, sem ele, nada acontece. A tool não conhece fila nem job.
+
+**O resultado de `confirmation_required` e de `cancelled` leva o horário do agendamento**
+(`starts_at` + `human`): é o que permite ao modelo dizer "a consulta de quarta, 14h30" sem o
+guardrail de saída barrar a frase. Efeito aceito: o horário recém-liberado vira evidência de
+horário naquele turno; qualquer oferta nova continua exigindo `check_availability`, e reservar
+continua exigindo `slot_token`.
+
+**Motivo livre.** `reason` é texto da pessoa e vai para `appointments.cancellation` e para o
+painel: passa por `redact_pii` (documento e cartão saem, 18.2) e o cancelamento segue — não
+recusa, como o `save_contact_info` faz, porque o cancelamento não pode depender do motivo.
+
+---
+
+## D-63 · Cenários de remarcar e cancelar: stub com o contrato de produção · S16
+
+Os quatro cenários (`remarcacao_dentro_do_prazo`, `remarcacao_fora_do_prazo`,
+`cancelamento_dentro_do_prazo`, `cancelamento_fora_do_prazo`) rodam o motor, os guardrails e o
+handoff de verdade, mas o **handler** de `find_appointments`, `reschedule_appointment` e
+`cancel_appointment` é do cenário (D-35: a suíte não toca banco). Para o stub não divergir do
+que o modelo vê em produção, o harness usa o `ToolSpec` real e troca só o handler
+(`_PRODUCTION_SPECS`): nome, descrição, schema e validação de argumentos são os de produção.
+Duas extensões do `StubTool`: `results` (uma resposta por chamada, a última se repete — o
+cancelamento responde `confirmation_required` e depois `cancelled`) e instantes `"@+1 14:30"`
+(relativos ao `now`, como os `slots`).
+
+**O que os cenários provam:** o motor escala por `needs_human` sem o modelo pedir; o agente
+fica calado depois (RF-28); a pergunta de confirmação não afirma cancelamento; a resposta de
+remarcação cita só o horário novo e passa pelo guardrail de saída. **O que não provam:** a
+regra de antecedência, o token em dois turnos e a transação — isso tem teste contra Postgres
+(`tests/integration/test_tools_change.py`, `test_booking_change.py`).
+
+---
+
 ## Pendências de verificação
 
 Todas fechadas. Estado verificado ao fim da Fase 0, contra Postgres 16 real:
@@ -1390,3 +1533,54 @@ Estado ao fim da S15, contra Postgres 16 e Redis reais:
   código pediria um vínculo entre chave e fato (serviço do hold, nome do contato) que não
   está desenhado. Hoje a garantia é a do prompt, que recebe `missing` calculado em código.
 - **Calendário de recurso** (D-58): recurso com `calendar_id` fica fora da oferta.
+
+---
+
+Estado ao fim da S16, contra Postgres 16 e Redis reais:
+
+| Item | Estado |
+|---|---|
+| Migrations `0001`–`0005` | ✅ aplicadas — nenhuma nova: `appointments.cancellation`, o status `rescheduled` e `appt_no_overlap` já vinham da S02 |
+| `reschedule_appointment` e `cancel_appointment` (tools) + `booking.reschedule_appointment` / `cancel_appointment` / `revert_reschedule` / `check_change` | ✅ 54 testes de integração em `tests/integration/test_tools_change.py` + 15 de domínio em `test_booking_change.py` |
+| Política de antecedência (`ChangePolicy`): mínimo inclusivo, agendamento iniciado nunca passa, `allow_*` | ✅ 8 testes unitários; vem da config, não do código (teste com dois tenants) |
+| Aceite: remarcar/cancelar **dentro** do prazo | ✅ tools contra o banco + cenários `remarcacao_dentro_do_prazo`, `cancelamento_dentro_do_prazo` |
+| Aceite: **abaixo** do mínimo escala | ✅ `needs_human` sem tocar o banco; pelo motor, `escalation_reason = policy:…` sem o modelo chamar `escalate_to_human`; cenários `remarcacao_fora_do_prazo`, `cancelamento_fora_do_prazo` (handoff aberto no 1º turno, agente em silêncio no 2º) |
+| Remarcação transacional: troca no savepoint; falha inesperada no meio → tudo volta + escala | ✅ erro injetado depois de o antigo ser cancelado: antigo `confirmed`, nenhuma linha nova |
+| Calendário: mesmo evento movido / criar-e-apagar entre profissionais / evento que não anda → `revert_reschedule` + escala / horário antigo tomado no intervalo → não reativa | ✅ 10 testes com calendário falso com estado |
+| Cancelamento em dois turnos: 1ª chamada não cancela; token no mesmo turno → `confirmation_pending`; token de outro agendamento/conversa/tenant, vencido ou adulterado → recusado | ✅ 23 testes unitários do token + integração + **pelo motor**: modelo que pede e confirma no mesmo turno termina com 0 cancelamentos |
+| Concorrência: 6 clientes disputam 1 horário → 1 leva, 5 ficam como estavam; mesmo pedido ×5 → 1 agendamento; remarcar × cancelar → 1 estado | ✅ `test_booking_change.py` |
+| Mutação: 13 quebras de propósito (token no mesmo turno, mínimo exclusivo, agendamento iniciado passa, motor ignora `needs_human`, `slot_taken` sem desfazer, falha de calendário sem reversão, prazo não reconferido ao cancelar, agendamento de outro contato, serviço trocado, pergunta sem política, `can_cancel` fixo, repetição duplicada, evento antigo mantido) | ✅ as 13 derrubam teste; a do motor derruba também 2 cenários conversacionais |
+| Suíte conversacional: 4 cenários novos no placar (18 + 9 + 12 + 11 asserções) e 6 testes novos do harness (respostas por chamada, instante relativo, contrato de produção no stub, nenhuma tool nova toca o banco) | ✅ 16 cenários `pass` |
+| Total: 983 testes (124 novos), nenhum pulado | ✅ verde (`.\tasks.ps1 check`) |
+| `ruff check` + `ruff format --check` | ✅ limpo |
+| `mypy --strict` | ✅ limpo (71 arquivos de `app`; `tests/conversational` e os arquivos novos de teste de integração também) |
+
+**Não verificado, e por quê:**
+
+- **Google Calendar real.** `update_event` e `delete_event` têm teste de cliente HTTP da S12
+  (`respx`), e a remarcação foi exercitada contra um calendário falso com estado; a composição
+  das duas pontas com a API do Google nunca rodou.
+- **Modelo real.** Os cenários usam modelo roteirizado e **handlers de stub** (D-63). Que o
+  modelo de verdade leia `can_reschedule`, copie o `confirmation_token`, espere a resposta do
+  cliente e redija sem prometer desfecho só aparece com `CONVERSATIONAL_LIVE=1`, que não foi
+  rodado. O código garante que ele não consegue cancelar no mesmo turno e que a escalada não
+  depende dele; **não** garante que ele não diga "cancelei" sem chamar a tool — essa defesa é
+  o `[LIMITES INEGOCIÁVEIS]`, como na confirmação (não há guardrail de saída para
+  afirmação de agendamento, só para horário e preço).
+- **O "sim" do cliente.** O código exige outro turno, não lê o conteúdo dele (D-62).
+- **Consumidor da lista de espera.** `on_slot_released` é chamado quando
+  `waitlist_enabled`; o job de encaixe é da Fase 3 (RF-25) e não existe. Sem consumidor, o
+  gancho não faz nada — o passo 4 da 12.3 está **no ponto de ligação, não ligado**.
+- **Lembretes do agendamento antigo (S19).** Cancelar ou remarcar não mexe em `reminders`: a
+  S19, que cria o job, precisa ignorar (ou cancelar) lembrete de agendamento `cancelled`.
+- **Sync reverso (S20).** Depois de mover um evento, `iCalUID` e
+  `extendedProperties.private.appointment_id` continuam sendo os do agendamento antigo
+  (D-61): o S20 casa evento e agendamento por `external_event_id`.
+- **`tasks.ps1 check` imprimia "Tudo verde." mesmo com teste falhando** — o PowerShell 5.1 não
+  interrompe em código de saída de comando nativo (`$ErrorActionPreference = "Stop"` só cobre
+  erro do próprio PowerShell). Notado numa rodada intermediária da S16: um teste meu falhava e
+  o rodapé dizia verde. **Corrigido logo depois:** `Invoke-Step` confere `$LASTEXITCODE` de cada
+  comando que decide o resultado (alembic, pytest, ruff, mypy, pip, docker compose) e para no
+  primeiro que falhar. Verificado nos dois sentidos: com um teste falhando de propósito, `check`
+  sai com código 1, não imprime "Tudo verde." e não chega ao lint; sem ele, sai com 0 (983
+  testes).

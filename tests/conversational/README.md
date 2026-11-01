@@ -92,8 +92,28 @@ Nenhum dos dois entra no placar: saída não determinística não bloqueia merge
 
 ## O que falta
 
-Dos 25 cenários obrigatórios da 19.3, estão escritos os que não dependem de agendamento.
-Os demais (agendamento feliz, preferência impossível, remarcação, cancelamento dentro e
-fora do prazo, slot tomado entre a oferta e a confirmação, duas conversas simultâneas,
-áudio, cliente recorrente) entram com S13–S16, quando as tools existirem — o runner já
-aceita o que eles vão precisar.
+Dos 25 cenários obrigatórios da 19.3, estão escritos os que não dependem de agendamento e,
+desde a S16, remarcação e cancelamento dentro e fora do prazo. Faltam agendamento feliz,
+preferência impossível, slot tomado entre a oferta e a confirmação, duas conversas
+simultâneas, áudio e cliente recorrente — o runner já aceita o que eles vão precisar.
+
+### Tools de produção com handler de cenário (S16)
+
+`find_appointments`, `reschedule_appointment` e `cancel_appointment` podem aparecer em
+`tools:` sem declarar schema: o runner usa o `ToolSpec` de produção (descrição, schema e
+validação de argumentos) e troca só o handler pelo resultado do cenário. Duas coisas a mais
+no stub:
+
+```yaml
+tools:
+  - name: cancel_appointment
+    results:                       # uma resposta por chamada; a última se repete
+      - result: { status: confirmation_required, confirmation_token: "tok", starts_at: "@+1 14:30" }
+      - result: { status: cancelled, starts_at: "@+1 14:30" }
+      # - error: true              # `is_error` da tool; recusa por regra (`needs_human`) é erro
+```
+
+`"@+1 14:30"` vira o instante ISO daquele dia, ancorado no `now` do cenário — o guardrail de
+saída lê ISO com offset como prova de horário. O cenário mede o que o sistema em volta do
+modelo faz com o resultado (escalar por `needs_human`, não deixar o cliente sem resposta); a
+regra de antecedência e o token de confirmação têm teste contra Postgres.

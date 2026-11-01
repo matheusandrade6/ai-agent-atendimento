@@ -1,9 +1,13 @@
 """Tool de leitura: agendamentos futuros do contato (secao 11.4, 12.2, 12.3).
 
 E o ponto de partida de remarcar e cancelar (S16): o `appointment_id` que elas recebem
-sai daqui. O filtro e **sempre** o contato da conversa — `contact_id` vem do contexto, nao
-de argumento, entao o modelo nao tem como listar os agendamentos de outra pessoa
-(invariante 3, no espirito: o que identifica quem pergunta nunca e escolhido pelo modelo).
+sai daqui, junto com `can_reschedule`/`can_cancel` — a mesma `ChangePolicy` que as duas
+tools aplicam, para o modelo saber, antes de oferecer horario, que a conversa vai para a
+equipe.
+
+O filtro e **sempre** o contato da conversa — `contact_id` vem do contexto, nao de
+argumento, entao o modelo nao tem como listar os agendamentos de outra pessoa (invariante 3,
+no espirito: o que identifica quem pergunta nunca e escolhido pelo modelo).
 """
 
 from __future__ import annotations
@@ -21,6 +25,7 @@ from app.core.config import Settings
 from app.core.db import tenant_session
 from app.domain.models import Appointment, Service, Subject
 from app.scheduling.availability import ACTIVE_APPOINTMENT_STATUSES
+from app.scheduling.rules import ChangePolicy
 
 __all__ = ["FindAppointmentsArgs", "find_appointments_tool"]
 
@@ -32,8 +37,11 @@ _LIMIT: Final = 10
 _DESCRIPTION = (
     "Lista os agendamentos futuros do cliente desta conversa, do mais proximo ao mais "
     "distante. Use para remarcar ou cancelar (se houver mais de um, pergunte qual) e para "
-    "responder 'quando e minha consulta?'. Cada item traz `appointment_id`. So os "
-    "agendamentos devolvidos existem: nao cite outro."
+    "responder 'quando e minha consulta?'. Cada item traz `appointment_id`, e "
+    "`can_reschedule`/`can_cancel` dizem se a politica da casa deixa mudar por aqui: com "
+    "`false`, nao ofereca horarios nem peca confirmacao — chame `reschedule_appointment` ou "
+    "`cancel_appointment` para encaminhar a equipe. So os agendamentos devolvidos existem: "
+    "nao cite outro."
 )
 
 _INPUT_SCHEMA: Mapping[str, Any] = {"type": "object", "properties": {}, "required": []}
@@ -71,6 +79,7 @@ class _Handler:
                 default_timezone=ctx.config.business_hours.timezone,
             )
 
+        policy = ChangePolicy.from_rules(ctx.config.scheduling)
         appointments: list[dict[str, Any]] = []
         for appointment, service_name, subject_name in rows:
             label = labels.get(appointment.provider_id)
@@ -82,12 +91,19 @@ class _Handler:
             appointments.append(
                 {
                     "appointment_id": str(appointment.id),
+                    # Para `check_availability` do mesmo servico ao remarcar.
+                    "service_id": str(appointment.service_id),
                     "service": service_name,
                     "subject_name": subject_name or appointment.intake.get("subject_name") or "",
                     "starts_at": local.isoformat(),
                     "human": human_slot(local),
                     "provider_name": label.name if label else "",
                     "status": appointment.status,
+                    # A politica de antecedencia ja aplicada (12.2, 12.3): o modelo nao
+                    # oferece horario para quem so a equipe pode remarcar.
+                    "can_reschedule": policy.verdict("reschedule", appointment.starts_at, ctx.now)
+                    == "ok",
+                    "can_cancel": policy.verdict("cancel", appointment.starts_at, ctx.now) == "ok",
                 }
             )
         return ToolResult(content={"appointments": appointments, "count": len(appointments)})

@@ -1,0 +1,85 @@
+# 12.3: confirmacao explicita em DOIS turnos. A primeira chamada de `cancel_appointment`
+# nao cancela: devolve `confirmation_required` e o agente pergunta. So no turno seguinte, com
+# o token, a tool devolve `cancelled`. O stub responde as duas chamadas em ordem.
+# A prova de que o modelo nao consegue cancelar numa mensagem so esta em
+# tests/integration/test_tools_change.py (token no mesmo turno e `confirmation_pending`).
+scenario: cancelamento_dentro_do_prazo
+tenant: clinica-exemplo
+description: >
+  Cliente pede para cancelar a consulta de amanhã. O agente pergunta e espera; só depois do
+  "sim" cancela, e oferece remarcar uma vez, sem insistir.
+
+now: "2026-09-08T10:00:00"
+
+tools:
+  - name: find_appointments
+    result:
+      count: 1
+      appointments:
+        - appointment_id: "0b8f6d1e-5a62-4c7e-9a31-6c2f1d9e7a10"
+          service_id: "consulta"
+          service: "Consulta clínica"
+          subject_name: "Mia"
+          starts_at: "@+1 14:30"
+          human: "quarta-feira, 9 de setembro, às 14h30"
+          provider_name: "Dra. Ana"
+          status: confirmed
+          can_reschedule: true
+          can_cancel: true
+  - name: cancel_appointment
+    results:
+      - result:
+          status: confirmation_required
+          appointment_id: "0b8f6d1e-5a62-4c7e-9a31-6c2f1d9e7a10"
+          service: "Consulta clínica"
+          subject_name: "Mia"
+          starts_at: "@+1 14:30"
+          human: "quarta-feira, 9 de setembro, às 14h30"
+          provider_name: "Dra. Ana"
+          confirmation_token: "token-de-confirmacao"
+          message: "Nada foi cancelado. Pergunte ao cliente se confirma e encerre o turno."
+      - result:
+          status: cancelled
+          appointment_id: "0b8f6d1e-5a62-4c7e-9a31-6c2f1d9e7a10"
+          service: "Consulta clínica"
+          subject_name: "Mia"
+          starts_at: "@+1 14:30"
+          human: "quarta-feira, 9 de setembro, às 14h30"
+          provider_name: "Dra. Ana"
+          message: "Cancelado. Confirme ao cliente e ofereca remarcar, uma vez, sem insistir."
+
+turns:
+  - user: "quero cancelar a consulta da Mia de amanhã"
+    agent:
+      - call: find_appointments
+      - call: cancel_appointment
+        arguments: { appointment_id: "0b8f6d1e-5a62-4c7e-9a31-6c2f1d9e7a10" }
+      - say: "Confirma o cancelamento da consulta da Mia na quarta-feira, 9 de setembro, às 14h30?"
+    expect:
+      tools_called: [find_appointments, cancel_appointment]
+      response_contains_any: ["confirma"]
+      response_excludes_any: ["cancelei", "cancelada", "cancelado"]
+      handoff_opened: false
+
+  - user: "sim, pode cancelar"
+    agent:
+      - call: cancel_appointment
+        arguments:
+          appointment_id: "0b8f6d1e-5a62-4c7e-9a31-6c2f1d9e7a10"
+          confirmation_token: "token-de-confirmacao"
+          reason: "cliente não pode ir"
+      - say: "Pronto, a consulta da Mia foi cancelada. Se quiser, posso ver um novo horário."
+    expect:
+      tools_called: [cancel_appointment]
+      no_tool_called: [find_appointments, escalate_to_human]
+      response_contains_any: ["cancelada"]
+      response_excludes_any: ["confirma o cancelamento"]
+      stage: answering
+      handoff_opened: false
+
+  - user: "não precisa, obrigado"
+    agent:
+      - say: "Tudo bem! Qualquer coisa é só chamar."
+    expect:
+      no_tool_called: [check_availability, reschedule_appointment, cancel_appointment]
+      handoff_opened: false
