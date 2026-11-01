@@ -47,7 +47,7 @@ tenants, alucinação de horário/preço ou perda de mensagem**, use Opus.
 | S13 | Motor de disponibilidade | 2 | **Opus** | S12, S03 | ✅ feito |
 | S14 | Hold, advisory lock, confirmação idempotente | 2 | **Opus** | S13 | ✅ feito |
 | S15 | `slot_token` assinado + tools de escrita | 2 | Sonnet | S14 | ✅ feito |
-| S16 | Fluxos de remarcação e cancelamento | 2 | Sonnet | S15 | ⬜ |
+| S16 | Fluxos de remarcação e cancelamento | 2 | Sonnet | S15 | ✅ feito |
 | S17 | Painel: auth, caixa de conversas, takeover | 3 | Sonnet | S10 | ⬜ |
 | S18 | Painel: agenda, serviços, horários, base, config | 3 | Sonnet | S17 | ⬜ |
 | S19 | Lembretes, cron e templates utility | 3 | **Opus** | S14, S05 | ⬜ |

@@ -1,0 +1,59 @@
+# 12.2, passo 2: "abaixo do minimo -> escala". A consulta e daqui a 2h e o tenant exige 4h.
+# O modelo ve `can_reschedule: false` e NAO oferece horario: chama `reschedule_appointment` so
+# com o appointment_id e a propria tool devolve `needs_human`. O motor abre o handoff no mesmo
+# turno (D-60), sem o modelo ter chamado `escalate_to_human`.
+scenario: remarcacao_fora_do_prazo
+tenant: clinica-exemplo
+description: >
+  Cliente quer remarcar uma consulta que é daqui a pouco. Abaixo da antecedência mínima a
+  conversa vai para a equipe: nenhum horário é oferecido e o agente fica em silêncio depois.
+
+now: "2026-09-08T10:00:00"
+
+tools:
+  - name: find_appointments
+    result:
+      count: 1
+      appointments:
+        - appointment_id: "0b8f6d1e-5a62-4c7e-9a31-6c2f1d9e7a10"
+          service_id: "consulta"
+          service: "Consulta clínica"
+          subject_name: "Mia"
+          starts_at: "@hoje 12:00"
+          human: "terça-feira, 8 de setembro, às 12h"
+          provider_name: "Dra. Ana"
+          status: confirmed
+          can_reschedule: false
+          can_cancel: false
+  - name: check_availability
+    description: "Horarios livres para o servico, no periodo pedido."
+    slots: ["+1 14:00"]
+  - name: reschedule_appointment
+    results:
+      - error: true
+        result:
+          status: needs_human
+          reason: remarcacao_fora_do_prazo
+          message: "Faltam menos horas para o atendimento do que a politica da casa exige."
+          suggested_action: "tell the customer that someone from the team will take over"
+
+turns:
+  - user: "oi, preciso remarcar minha consulta de hoje, não vou conseguir ir"
+    agent:
+      - call: find_appointments
+      - call: reschedule_appointment
+        arguments: { appointment_id: "0b8f6d1e-5a62-4c7e-9a31-6c2f1d9e7a10" }
+      - say: "Como a consulta é daqui a pouco, não consigo remarcar por aqui. Já chamei alguém da equipe para te ajudar."
+    expect:
+      tools_called: [find_appointments, reschedule_appointment]
+      no_tool_called: [check_availability, escalate_to_human]
+      handoff_opened: true
+      handoff_reason: remarcacao_fora_do_prazo
+      max_turns_to_escalate: 1
+      response_contains_any: ["equipe"]
+      stage: handoff
+
+  - user: "alô? alguém aí?"
+    expect:
+      silenced: true
+      handoff_opened: true

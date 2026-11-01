@@ -128,6 +128,8 @@ def test_papel_e_fixo_e_fecha_o_escopo() -> None:
         "Nunca de orientacao clinica",
         "Nunca prometa horario sem chamar `check_availability`",
         "Nunca confirme agendamento sem chamar `confirm_appointment`",
+        "Nunca diga que remarcou ou cancelou sem chamar `reschedule_appointment`",
+        "Cancelar exige a confirmacao do cliente",
         "chame `escalate_to_human` na hora",
     ],
 )

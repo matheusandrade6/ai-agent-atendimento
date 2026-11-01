@@ -26,7 +26,7 @@ import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Literal, Protocol
+from typing import Any, Final, Literal, Protocol
 
 from pydantic import BaseModel
 
@@ -34,6 +34,7 @@ from app.agent.llm import ToolSchema
 from app.domain.tenant_config import TenantConfig
 
 __all__ = [
+    "NEEDS_HUMAN",
     "ToolContext",
     "ToolError",
     "ToolRegistry",
@@ -43,6 +44,12 @@ __all__ = [
 ]
 
 ToolKind = Literal["read", "write"]
+
+#: `status` de um resultado que o codigo nao pode atender sozinho: o motor le o valor e abre
+#: o handoff no mesmo turno (`app.agent.engine._tool_escalation_reason`, D-60). E a escalada
+#: decidida por regra — antecedencia minima, politica do tenant, falha com rollback —, e nao
+#: pelo modelo, que ate pode esquecer de chamar `escalate_to_human`.
+NEEDS_HUMAN: Final = "needs_human"
 
 
 class ToolError(Exception):

@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -57,9 +57,13 @@ from app.agent.tools.base import (
     ToolResult,
     ToolSpec,
 )
+from app.agent.tools.cancel_appointment import cancel_appointment_tool
 from app.agent.tools.escalate_to_human import escalate_to_human_tool
+from app.agent.tools.find_appointments import find_appointments_tool
 from app.agent.tools.list_services import list_services_tool
+from app.agent.tools.reschedule_appointment import reschedule_appointment_tool
 from app.agent.tools.search_knowledge import search_knowledge_tool
+from app.calendar.resolver import no_calendars
 from app.core.time import tz_of
 from app.domain.tenant_config import TenantConfig, load_tenant_config
 from app.knowledge.embeddings import HashingEmbeddingProvider
@@ -132,6 +136,13 @@ class KnowledgeFixture(_Model):
     score: float = 0.9
 
 
+class StubResult(_Model):
+    """Uma resposta do stub. `error` e o `is_error` da tool: recusa por regra e erro."""
+
+    result: dict[str, Any] = Field(default_factory=dict)
+    error: bool = False
+
+
 class StubTool(_Model):
     """Tool extra do cenario: schema declarado no YAML, resultado fixo.
 
@@ -139,6 +150,13 @@ class StubTool(_Model):
     `confirm_appointment`) e que so ganham implementacao na S13/S15. Declarar o schema
     no dado, e nao em Python, evita fixar aqui uma interface que ainda nao foi desenhada
     — quando ela existir, o cenario troca o stub pela tool de verdade.
+
+    As tools de remarcar e cancelar (S16) ja existem, mas dependem de banco; o stub delas
+    fica com o **contrato de producao** (`_PRODUCTION_SPECS`): nome, descricao, schema e
+    validacao de argumentos sao os da tool real, e so o handler e trocado. O que o cenario
+    mede e o que o sistema em volta do modelo faz com o resultado — escalar por
+    `needs_human`, nao deixar o cliente sem resposta —, nao a regra de antecedencia, que
+    tem teste contra o banco (`tests/integration/test_tools_change.py`).
     """
 
     name: str
@@ -146,6 +164,9 @@ class StubTool(_Model):
     kind: Literal["read", "write"] = "read"
     input_schema: dict[str, Any] = Field(default_factory=lambda: {"type": "object"})
     result: dict[str, Any] = Field(default_factory=dict)
+    #: Respostas por chamada, na ordem; a ultima se repete. Serve ao cancelamento em dois
+    #: turnos, onde a segunda chamada responde diferente da primeira.
+    results: list[StubResult] = Field(default_factory=list)
     #: Slots relativos (`+1 14:30`) resolvidos pelo `FakeCalendar` e entregues como
     #: `{"slots": [...]}`. Data absoluta apodrece; ver `FakeCalendar`.
     slots: list[str] = Field(default_factory=list)
@@ -295,11 +316,34 @@ class ScenarioResult:
 # ================================== execucao ==================================
 
 
+def _resolve_instants(value: Any, calendar: FakeCalendar) -> Any:
+    """`"@+1 14:30"` vira o instante ISO daquele dia, ancorado no `now` do cenario.
+
+    Mesma razao dos `slots`: data absoluta escrita no YAML apodrece, e o guardrail de saida
+    le o ISO com offset como prova de horario.
+    """
+    if isinstance(value, str) and value.startswith("@"):
+        return calendar.resolve(value[1:]).isoformat()
+    if isinstance(value, list):
+        return [_resolve_instants(item, calendar) for item in value]
+    if isinstance(value, dict):
+        return {key: _resolve_instants(item, calendar) for key, item in value.items()}
+    return value
+
+
 def _stub_handler(stub: StubTool, calendar: FakeCalendar) -> ToolHandler:
+    calls = 0
+
     async def handler(ctx: ToolContext, arguments: Mapping[str, Any]) -> ToolResult:
+        nonlocal calls
         if stub.error:
             return ToolResult(content={"error": "falha_da_ferramenta"}, is_error=True)
-        content = dict(stub.result)
+        if stub.results:
+            scripted = stub.results[min(calls, len(stub.results) - 1)]
+            calls += 1
+            content = _resolve_instants(dict(scripted.result), calendar)
+            return ToolResult(content=content, is_error=scripted.error)
+        content = _resolve_instants(dict(stub.result), calendar)
         if stub.slots:
             content["slots"] = calendar.free_slots(stub.slots)
         return ToolResult(content=content)
@@ -341,6 +385,14 @@ def _knowledge_handler(snippets: Sequence[KnowledgeFixture]) -> ToolHandler:
     return handler
 
 
+#: Tools de producao que o cenario pode simular so no handler (ver `StubTool`).
+_PRODUCTION_SPECS: dict[str, Callable[[], ToolSpec]] = {
+    "find_appointments": find_appointments_tool,
+    "reschedule_appointment": lambda: reschedule_appointment_tool(no_calendars),
+    "cancel_appointment": lambda: cancel_appointment_tool(no_calendars),
+}
+
+
 def build_registry(scenario: Scenario, calendar: FakeCalendar) -> ToolRegistry:
     """Tools do cenario: as de verdade com o handler trocado, mais os stubs do YAML.
 
@@ -357,6 +409,10 @@ def build_registry(scenario: Scenario, calendar: FakeCalendar) -> ToolRegistry:
         escalate_to_human_tool(),
     ]
     for stub in scenario.tools:
+        production = _PRODUCTION_SPECS.get(stub.name)
+        if production is not None:
+            specs.append(replace(production(), handler=_stub_handler(stub, calendar)))
+            continue
         specs.append(
             ToolSpec(
                 name=stub.name,

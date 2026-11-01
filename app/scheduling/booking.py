@@ -18,6 +18,10 @@ confirmacao do mesmo hold devolve o mesmo `appointment_id` — o hold e travado 
 `FOR UPDATE` antes da busca pela chave, entao duas confirmacoes simultaneas do mesmo hold
 tambem resolvem para uma linha so.
 
+Remarcar e cancelar (12.2, 12.3, S16) seguem a mesma regra: `reschedule_appointment` troca o
+agendamento antigo pelo novo num savepoint — os dois ou nenhum — e `cancel_appointment` so
+muda a linha. Ambos conferem a politica de antecedencia com a linha travada.
+
 Quem chama abre a transacao (`tenant_session`) e faz o commit; os locks sao de transacao e
 somem com ela. O evento no calendario **nao** e criado aqui: depois do commit, quem chama
 usa `app.calendar.sync_state.push_appointment_event` (D-43: nunca segurar o lock durante a
@@ -48,17 +52,32 @@ from app.domain.models import (
     ServiceProvider,
     ServiceResource,
 )
-from app.scheduling.availability import db_occupation
-from app.scheduling.rules import ServiceDuration, fits_capacity, overlaps
+from app.scheduling.availability import ACTIVE_APPOINTMENT_STATUSES, db_occupation
+from app.scheduling.rules import (
+    ChangeKind,
+    ChangePolicy,
+    ServiceDuration,
+    fits_capacity,
+    overlaps,
+)
 
 __all__ = [
+    "CancelResult",
+    "CancelStatus",
     "ConfirmResult",
     "HoldResult",
+    "RescheduleResult",
+    "RescheduleStatus",
+    "cancel_appointment",
+    "check_change",
     "confirm_appointment",
     "expire_holds",
     "hold_slot",
     "idempotency_key_for",
     "lock_keys",
+    "reschedule_appointment",
+    "reschedule_key_for",
+    "revert_reschedule",
 ]
 
 #: Constraint de exclusao da migration 0002 e o SQLSTATE `exclusion_violation`.
@@ -227,57 +246,25 @@ async def hold_slot(
     )
     if conversation is None:
         return HoldResult(status="invalid", reason="conversa inexistente")
-    service = await session.scalar(
-        select(Service).where(
-            Service.tenant_id == tenant_id, Service.id == service_id, Service.active.is_(True)
-        )
+    plan = await _plan_slot(
+        session,
+        tenant_id=tenant_id,
+        provider_id=provider_id,
+        service_id=service_id,
+        resource_id=resource_id,
+        starts_at=starts_at,
     )
-    if service is None:
-        return HoldResult(status="invalid", reason="servico inexistente ou inativo")
-    link = (
-        await session.execute(
-            select(ServiceProvider.duration_override_min)
-            .join(Provider, Provider.id == ServiceProvider.provider_id)
-            .where(
-                Provider.tenant_id == tenant_id,
-                Provider.id == provider_id,
-                Provider.active.is_(True),
-                ServiceProvider.service_id == service.id,
-            )
-        )
-    ).one_or_none()
-    if link is None:
-        return HoldResult(status="invalid", reason="profissional nao atende o servico")
+    if isinstance(plan, str):
+        return HoldResult(status="invalid", reason=plan)
 
-    linked_resources = set(
-        await session.scalars(
-            select(ServiceResource.resource_id).where(ServiceResource.service_id == service.id)
-        )
-    )
-    resource: Resource | None = None
-    if linked_resources:
-        if resource_id not in linked_resources:
-            return HoldResult(status="invalid", reason="servico exige um recurso apto")
-        resource = await session.scalar(
-            select(Resource).where(Resource.tenant_id == tenant_id, Resource.id == resource_id)
-        )
-        if resource is None:
-            return HoldResult(status="invalid", reason="recurso inexistente")
-    elif resource_id is not None:
-        return HoldResult(status="invalid", reason="servico nao usa recurso")
-
-    duration = ServiceDuration.resolve(
-        duration_minutes=service.duration_minutes,
-        buffer_before_min=service.buffer_before_min,
-        buffer_after_min=service.buffer_after_min,
-        override_minutes=link.duration_override_min,
-    )
-    block = duration.block_for(starts_at)
-    ends_at = starts_at + duration.core
-
-    await _acquire(session, lock_keys(_owners(provider_id, resource_id), block))
+    await _acquire(session, lock_keys(_owners(provider_id, resource_id), plan.block))
     if await _conflicts(
-        session, tenant_id, block=block, provider_id=provider_id, resource=resource, now=now
+        session,
+        tenant_id,
+        block=plan.block,
+        provider_id=provider_id,
+        resource=plan.resource,
+        now=now,
     ):
         return HoldResult(status="slot_taken")
 
@@ -289,16 +276,100 @@ async def hold_slot(
             conversation_id=conversation_id,
             provider_id=provider_id,
             resource_id=resource_id,
-            service_id=service.id,
+            service_id=plan.service.id,
             starts_at=starts_at,
-            ends_at=ends_at,
+            ends_at=plan.ends_at,
             expires_at=expires_at,
         )
         .returning(Hold.id)
     )
     assert hold_id is not None
     return HoldResult(
-        status="held", hold_id=hold_id, starts_at=starts_at, ends_at=ends_at, expires_at=expires_at
+        status="held",
+        hold_id=hold_id,
+        starts_at=starts_at,
+        ends_at=plan.ends_at,
+        expires_at=expires_at,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _SlotPlan:
+    """O que o banco diz sobre um horario ofertado: servico, recurso e o bloco que ocupa."""
+
+    service: Service
+    resource: Resource | None
+    block: Interval
+    ends_at: datetime
+    location_id: uuid.UUID | None
+
+
+async def _plan_slot(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    provider_id: uuid.UUID,
+    service_id: uuid.UUID,
+    resource_id: uuid.UUID | None,
+    starts_at: datetime,
+) -> _SlotPlan | str:
+    """Confere que o profissional atende o servico e monta o bloco. Texto = motivo da recusa.
+
+    E a validacao que `hold_slot` e `reschedule_appointment` compartilham: um horario novo
+    entra no banco pelas mesmas regras, venha de uma reserva ou de uma remarcacao. O fim do
+    atendimento vem do banco, nunca de quem chama (D-50).
+    """
+    service = await session.scalar(
+        select(Service).where(
+            Service.tenant_id == tenant_id, Service.id == service_id, Service.active.is_(True)
+        )
+    )
+    if service is None:
+        return "servico inexistente ou inativo"
+    link = (
+        await session.execute(
+            select(ServiceProvider.duration_override_min, Provider.location_id)
+            .join(Provider, Provider.id == ServiceProvider.provider_id)
+            .where(
+                Provider.tenant_id == tenant_id,
+                Provider.id == provider_id,
+                Provider.active.is_(True),
+                ServiceProvider.service_id == service.id,
+            )
+        )
+    ).one_or_none()
+    if link is None:
+        return "profissional nao atende o servico"
+
+    linked_resources = set(
+        await session.scalars(
+            select(ServiceResource.resource_id).where(ServiceResource.service_id == service.id)
+        )
+    )
+    resource: Resource | None = None
+    if linked_resources:
+        if resource_id not in linked_resources:
+            return "servico exige um recurso apto"
+        resource = await session.scalar(
+            select(Resource).where(Resource.tenant_id == tenant_id, Resource.id == resource_id)
+        )
+        if resource is None:
+            return "recurso inexistente"
+    elif resource_id is not None:
+        return "servico nao usa recurso"
+
+    duration = ServiceDuration.resolve(
+        duration_minutes=service.duration_minutes,
+        buffer_before_min=service.buffer_before_min,
+        buffer_after_min=service.buffer_after_min,
+        override_minutes=link.duration_override_min,
+    )
+    return _SlotPlan(
+        service=service,
+        resource=resource,
+        block=duration.block_for(starts_at),
+        ends_at=starts_at + duration.core,
+        location_id=link.location_id,
     )
 
 
@@ -457,6 +528,391 @@ async def confirm_appointment(
     assert appointment_id is not None
     await _set_hold_status(session, hold.id, "consumed")
     return ConfirmResult(status="confirmed", appointment_id=appointment_id)
+
+
+# ------------------------------ remarcacao e cancelamento ------------------------------
+#
+# Mesma disciplina da confirmacao: so o banco, numa transacao de quem chama, e o evento do
+# calendario fica para depois do commit (D-43). A politica de antecedencia (`ChangePolicy`)
+# e conferida **aqui**, com a linha travada: a decisao de escalar nao pode depender de o
+# modelo ter lido o relogio.
+
+
+ChangeBlock = Literal["not_found", "not_active", "too_late", "not_allowed"]
+RescheduleStatus = Literal[
+    "rescheduled", "slot_taken", "same_slot", "wrong_service", "invalid", ChangeBlock
+]
+CancelStatus = Literal["cancelled", ChangeBlock]
+
+
+@dataclass(frozen=True, slots=True)
+class RescheduleResult:
+    status: RescheduleStatus
+    #: O agendamento novo (`rescheduled`) — o que passa a valer.
+    appointment_id: uuid.UUID | None = None
+    #: O agendamento que foi movido, hoje `cancelled` com `cancellation.replaced_by`.
+    previous_id: uuid.UUID | None = None
+    #: `True` quando a remarcacao ja tinha acontecido: nada foi criado agora.
+    replayed: bool = False
+    #: So em `invalid`: o que estava errado no horario. Nao e texto para o cliente.
+    reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CancelResult:
+    status: CancelStatus
+    appointment_id: uuid.UUID | None = None
+    replayed: bool = False
+
+
+def reschedule_key_for(
+    appointment_id: uuid.UUID,
+    provider_id: uuid.UUID,
+    resource_id: uuid.UUID | None,
+    starts_at: datetime,
+) -> str:
+    """Chave natural da remarcacao: este agendamento, para este horario. Repetir devolve o mesmo."""
+    start = starts_at.astimezone(UTC).isoformat()
+    raw = f"reschedule:{appointment_id}:{provider_id}:{resource_id or '-'}:{start}"
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def _cancellation_record(
+    kind: Literal["cancel", "reschedule", "reschedule_failed"],
+    appointment: Appointment,
+    *,
+    conversation_id: uuid.UUID,
+    now: datetime,
+    reason: str | None = None,
+    replaced_by: uuid.UUID | None = None,
+) -> dict[str, Any]:
+    """`appointments.cancellation` (09): quem, quando, por que e o que era antes.
+
+    `previous_status` e o que permite desfazer uma remarcacao sem adivinhar se o agendamento
+    era `confirmed` ou ja tinha sido remarcado antes.
+    """
+    record: dict[str, Any] = {
+        "kind": kind,
+        "by": "contact",
+        "via": "agent",
+        "at": now.isoformat(),
+        "conversation_id": str(conversation_id),
+        "previous_status": appointment.status,
+    }
+    if reason:
+        record["reason"] = reason
+    if replaced_by is not None:
+        record["replaced_by"] = str(replaced_by)
+    return record
+
+
+async def _lock_for_change(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    appointment_id: uuid.UUID,
+    contact_id: uuid.UUID,
+    *,
+    lock: bool = True,
+) -> Appointment | None:
+    """O agendamento **deste contato**. De outro contato, ou de outro tenant, nao existe."""
+    statement = select(Appointment).where(
+        Appointment.tenant_id == tenant_id,
+        Appointment.id == appointment_id,
+        Appointment.contact_id == contact_id,
+    )
+    if lock:
+        statement = statement.with_for_update()
+    return (await session.execute(statement)).scalar_one_or_none()
+
+
+def _change_block(
+    appointment: Appointment, kind: ChangeKind, policy: ChangePolicy, now: datetime
+) -> ChangeBlock | None:
+    if appointment.status not in ACTIVE_APPOINTMENT_STATUSES:
+        return "not_active"
+    verdict = policy.verdict(kind, appointment.starts_at, now)
+    return None if verdict == "ok" else verdict
+
+
+async def check_change(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    appointment_id: uuid.UUID,
+    contact_id: uuid.UUID,
+    kind: ChangeKind,
+    policy: ChangePolicy,
+    now: datetime,
+) -> Literal["ok"] | ChangeBlock:
+    """Pode remarcar/cancelar? So le: o primeiro `cancel_appointment` pergunta antes de agir."""
+    _require_aware(now=now)
+    appointment = await _lock_for_change(session, tenant_id, appointment_id, contact_id, lock=False)
+    if appointment is None:
+        return "not_found"
+    return _change_block(appointment, kind, policy, now) or "ok"
+
+
+async def cancel_appointment(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    appointment_id: uuid.UUID,
+    contact_id: uuid.UUID,
+    conversation_id: uuid.UUID,
+    policy: ChangePolicy,
+    reason: str | None,
+    now: datetime,
+) -> CancelResult:
+    """Cancela, uma vez so. Repetir na mesma conversa devolve o mesmo resultado."""
+    _require_aware(now=now)
+    appointment = await _lock_for_change(session, tenant_id, appointment_id, contact_id)
+    if appointment is None:
+        return CancelResult(status="not_found")
+    previous = appointment.cancellation or {}
+    if (
+        appointment.status == "cancelled"
+        and previous.get("kind") == "cancel"
+        and previous.get("conversation_id") == str(conversation_id)
+    ):
+        return CancelResult(status="cancelled", appointment_id=appointment.id, replayed=True)
+
+    blocked = _change_block(appointment, "cancel", policy, now)
+    if blocked is not None:
+        return CancelResult(status=blocked, appointment_id=appointment.id)
+
+    await session.execute(
+        update(Appointment)
+        .where(Appointment.tenant_id == tenant_id, Appointment.id == appointment.id)
+        .values(
+            status="cancelled",
+            cancellation=_cancellation_record(
+                "cancel", appointment, conversation_id=conversation_id, now=now, reason=reason
+            ),
+        )
+        .execution_options(synchronize_session=False)
+    )
+    return CancelResult(status="cancelled", appointment_id=appointment.id)
+
+
+async def reschedule_appointment(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    appointment_id: uuid.UUID,
+    contact_id: uuid.UUID,
+    conversation_id: uuid.UUID,
+    provider_id: uuid.UUID,
+    service_id: uuid.UUID,
+    resource_id: uuid.UUID | None,
+    starts_at: datetime,
+    policy: ChangePolicy,
+    now: datetime,
+) -> RescheduleResult:
+    """Cria o agendamento novo e cancela o antigo, **ou nenhum dos dois** (12.2).
+
+    As duas escritas moram num savepoint: se o horario novo esbarra em alguem — pelo mesmo
+    teste do hold ou pela `appt_no_overlap` —, o antigo volta a valer como se nada tivesse
+    acontecido. O antigo e cancelado **antes** do teste de conflito porque remarcar para
+    um horario vizinho (08:00 -> 08:15) se sobrepoe ao proprio agendamento; fora do savepoint
+    isso seria um falso `slot_taken`.
+
+    O novo nasce `rescheduled` e `pending_sync`: quem chama move o evento depois do commit.
+    O `intake` e o contato passam adiante; `_rescheduled_from` guarda de onde veio.
+    """
+    _require_aware(starts_at=starts_at, now=now)
+    old = await _lock_for_change(session, tenant_id, appointment_id, contact_id)
+    if old is None:
+        return RescheduleResult(status="not_found")
+
+    key = reschedule_key_for(old.id, provider_id, resource_id, starts_at)
+    replay = await _existing(session, tenant_id, key)
+    if replay is not None:
+        return RescheduleResult(
+            status="rescheduled", appointment_id=replay, previous_id=old.id, replayed=True
+        )
+
+    blocked = _change_block(old, "reschedule", policy, now)
+    if blocked is not None:
+        return RescheduleResult(status=blocked, previous_id=old.id)
+    if service_id != old.service_id:
+        return RescheduleResult(status="wrong_service", previous_id=old.id)
+    if starts_at <= now:
+        return RescheduleResult(status="invalid", previous_id=old.id, reason="horario no passado")
+    if (provider_id, resource_id, starts_at) == (old.provider_id, old.resource_id, old.starts_at):
+        return RescheduleResult(status="same_slot", previous_id=old.id)
+
+    plan = await _plan_slot(
+        session,
+        tenant_id=tenant_id,
+        provider_id=provider_id,
+        service_id=service_id,
+        resource_id=resource_id,
+        starts_at=starts_at,
+    )
+    if isinstance(plan, str):
+        return RescheduleResult(status="invalid", previous_id=old.id, reason=plan)
+
+    await _acquire(session, lock_keys(_owners(provider_id, resource_id), plan.block))
+    new_id = uuid.uuid4()
+    savepoint = await session.begin_nested()
+    try:
+        await session.execute(
+            update(Appointment)
+            .where(Appointment.tenant_id == tenant_id, Appointment.id == old.id)
+            .values(
+                status="cancelled",
+                cancellation=_cancellation_record(
+                    "reschedule", old, conversation_id=conversation_id, now=now, replaced_by=new_id
+                ),
+            )
+            .execution_options(synchronize_session=False)
+        )
+        # As reservas da propria conversa perdem o sentido: o horario escolhido veio do token.
+        await session.execute(
+            update(Hold)
+            .where(
+                Hold.tenant_id == tenant_id,
+                Hold.conversation_id == conversation_id,
+                Hold.status == "active",
+            )
+            .values(status="expired")
+            .execution_options(synchronize_session=False)
+        )
+        if await _conflicts(
+            session,
+            tenant_id,
+            block=plan.block,
+            provider_id=provider_id,
+            resource=plan.resource,
+            now=now,
+        ):
+            await savepoint.rollback()
+            return RescheduleResult(status="slot_taken", previous_id=old.id)
+        await session.execute(
+            insert(Appointment).values(
+                id=new_id,
+                tenant_id=tenant_id,
+                contact_id=old.contact_id,
+                subject_id=old.subject_id,
+                conversation_id=conversation_id,
+                provider_id=provider_id,
+                resource_id=resource_id,
+                service_id=service_id,
+                location_id=plan.location_id,
+                starts_at=starts_at,
+                ends_at=plan.ends_at,
+                status="rescheduled",
+                source="agent",
+                sync_status="pending_sync",
+                idempotency_key=key,
+                intake={**old.intake, "_rescheduled_from": str(old.id)},
+            )
+        )
+    except IntegrityError as exc:
+        await savepoint.rollback()
+        if _is_overlap_violation(exc):
+            return RescheduleResult(status="slot_taken", previous_id=old.id)
+        if _violated_constraint(exc) == IDEMPOTENCY_CONSTRAINT:
+            existing = await _existing(session, tenant_id, key)
+            if existing is not None:
+                return RescheduleResult(
+                    status="rescheduled", appointment_id=existing, previous_id=old.id, replayed=True
+                )
+        raise
+    except BaseException:
+        await savepoint.rollback()
+        raise
+    await savepoint.commit()
+    return RescheduleResult(status="rescheduled", appointment_id=new_id, previous_id=old.id)
+
+
+async def revert_reschedule(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    appointment_id: uuid.UUID,
+    previous_id: uuid.UUID,
+    conversation_id: uuid.UUID,
+    now: datetime,
+) -> bool:
+    """Desfaz uma remarcacao ja commitada: cancela o novo e reativa o antigo (12.2).
+
+    E o "rollback" do passo 4 da 12.2 para o que o banco nao desfaz sozinho — o evento no
+    calendario nao conseguiu ser movido, e o profissional olharia o horario errado. Devolve
+    se o antigo voltou a valer. `False` quando alguem ocupou o horario antigo no intervalo
+    entre o commit e a reversao: nesse caso o antigo **fica cancelado** (reativa-lo seria
+    overbooking, invariante 6) e quem chama precisa dizer isso a um humano.
+    """
+    _require_aware(now=now)
+    old = (
+        await session.execute(
+            select(Appointment)
+            .where(Appointment.tenant_id == tenant_id, Appointment.id == previous_id)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    new = (
+        await session.execute(
+            select(Appointment)
+            .where(Appointment.tenant_id == tenant_id, Appointment.id == appointment_id)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if old is None or new is None:
+        return False
+    if new.status == "cancelled":
+        return old.status in ACTIVE_APPOINTMENT_STATUSES  # reversao repetida
+
+    restore_to = (old.cancellation or {}).get("previous_status", "confirmed")
+    await session.execute(
+        update(Appointment)
+        .where(Appointment.tenant_id == tenant_id, Appointment.id == new.id)
+        .values(
+            status="cancelled",
+            cancellation=_cancellation_record(
+                "reschedule_failed", new, conversation_id=conversation_id, now=now
+            ),
+        )
+        .execution_options(synchronize_session=False)
+    )
+
+    service = await session.scalar(
+        select(Service).where(Service.tenant_id == tenant_id, Service.id == old.service_id)
+    )
+    assert service is not None  # FK; RLS do mesmo tenant
+    resource: Resource | None = None
+    if old.resource_id is not None:
+        resource = await session.scalar(
+            select(Resource).where(Resource.tenant_id == tenant_id, Resource.id == old.resource_id)
+        )
+    block = Interval(
+        old.starts_at - timedelta(minutes=service.buffer_before_min),
+        old.ends_at + timedelta(minutes=service.buffer_after_min),
+    )
+    await _acquire(session, lock_keys(_owners(old.provider_id, old.resource_id), block))
+    if await _conflicts(
+        session, tenant_id, block=block, provider_id=old.provider_id, resource=resource, now=now
+    ):
+        return False
+
+    savepoint = await session.begin_nested()
+    try:
+        await session.execute(
+            update(Appointment)
+            .where(Appointment.tenant_id == tenant_id, Appointment.id == old.id)
+            .values(status=restore_to, cancellation=None)
+            .execution_options(synchronize_session=False)
+        )
+    except IntegrityError as exc:
+        await savepoint.rollback()
+        if _is_overlap_violation(exc):
+            return False
+        raise
+    except BaseException:
+        await savepoint.rollback()
+        raise
+    await savepoint.commit()
+    return True
 
 
 # ----------------------------------- expiracao -----------------------------------

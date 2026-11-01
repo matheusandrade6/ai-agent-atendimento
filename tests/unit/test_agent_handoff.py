@@ -29,6 +29,12 @@ def test_motivo_de_tool_vira_agent() -> None:
     assert triggered_by_for("tool:fora_de_escopo") == "agent"
 
 
+def test_motivo_de_regra_da_tool_vira_rule() -> None:
+    """Antecedencia minima e politica do tenant: o sistema recusou, o modelo nao decidiu."""
+    assert triggered_by_for("policy:cancelamento_fora_do_prazo") == "rule"
+    assert triggered_by_for("policy:falha_ao_remarcar") == "rule"
+
+
 def test_motivo_de_gatilho_de_entrada_vira_contact() -> None:
     assert triggered_by_for("trigger:emergencia") == "contact"
     assert triggered_by_for("trigger:pedido_humano") == "contact"

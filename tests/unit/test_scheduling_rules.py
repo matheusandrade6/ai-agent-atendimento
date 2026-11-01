@@ -10,6 +10,8 @@ from pydantic import ValidationError
 from app.calendar.base import Interval
 from app.domain.tenant_config import BusinessHours, SchedulingRules
 from app.scheduling.rules import (
+    ChangeKind,
+    ChangePolicy,
     Preferences,
     SchedulingPolicy,
     ServiceDuration,
@@ -241,3 +243,67 @@ def test_aderencia_por_faixa_de_horario() -> None:
 def test_servico_online_ignora_location() -> None:
     assert uses_location("in_person")
     assert not uses_location("online")
+
+
+# --------------------------- antecedencia para remarcar e cancelar ---------------------------
+
+
+def change_policy(**overrides: float | bool) -> ChangePolicy:
+    return ChangePolicy.from_rules(SchedulingRules(**overrides))
+
+
+def test_politica_de_mudanca_vem_da_config() -> None:
+    policy = change_policy(
+        reschedule_min_notice_hours=6, cancel_min_notice_hours=2.5, allow_cancel=False
+    )
+
+    assert policy.reschedule_min_notice == timedelta(hours=6)
+    assert policy.cancel_min_notice == timedelta(hours=2, minutes=30)
+    assert policy.allow_reschedule is True
+    assert policy.allow_cancel is False
+
+
+@pytest.mark.parametrize("kind", ["reschedule", "cancel"])
+def test_antecedencia_minima_e_inclusiva(kind: ChangeKind) -> None:
+    """Faltando exatamente o minimo, passa; um minuto a menos, vai para a equipe."""
+    policy = change_policy(reschedule_min_notice_hours=4, cancel_min_notice_hours=4)
+    now = utc(2026, 9, 8, 13)
+
+    assert policy.verdict(kind, now + timedelta(hours=4), now) == "ok"
+    assert policy.verdict(kind, now + timedelta(hours=4) - timedelta(minutes=1), now) == "too_late"
+    assert policy.verdict(kind, now + timedelta(days=3), now) == "ok"
+
+
+def test_cada_acao_tem_o_seu_minimo() -> None:
+    policy = change_policy(reschedule_min_notice_hours=24, cancel_min_notice_hours=2)
+    now = utc(2026, 9, 8, 13)
+    in_five_hours = now + timedelta(hours=5)
+
+    assert policy.verdict("cancel", in_five_hours, now) == "ok"
+    assert policy.verdict("reschedule", in_five_hours, now) == "too_late"
+
+
+@pytest.mark.parametrize("kind", ["reschedule", "cancel"])
+def test_agendamento_que_ja_comecou_nunca_passa_nem_com_minimo_zero(kind: ChangeKind) -> None:
+    policy = change_policy(reschedule_min_notice_hours=0, cancel_min_notice_hours=0)
+    now = utc(2026, 9, 8, 13)
+
+    assert policy.verdict(kind, now, now) == "too_late"
+    assert policy.verdict(kind, now - timedelta(minutes=1), now) == "too_late"
+    assert policy.verdict(kind, now + timedelta(minutes=1), now) == "ok"
+
+
+def test_acao_desligada_no_tenant_vai_para_a_equipe_em_qualquer_prazo() -> None:
+    policy = change_policy(allow_reschedule=False, allow_cancel=False)
+    now = utc(2026, 9, 8, 13)
+    far = now + timedelta(days=30)
+
+    assert policy.verdict("reschedule", far, now) == "not_allowed"
+    assert policy.verdict("cancel", far, now) == "not_allowed"
+
+
+def test_desligar_uma_acao_nao_desliga_a_outra() -> None:
+    policy = change_policy(allow_reschedule=False)
+    now = utc(2026, 9, 8, 13)
+
+    assert policy.verdict("cancel", now + timedelta(days=1), now) == "ok"

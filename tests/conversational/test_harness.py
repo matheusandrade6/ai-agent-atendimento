@@ -12,15 +12,26 @@ Os dois ultimos testes cuidam do criterio de aceite da S11: a suite roda offline
 
 from __future__ import annotations
 
+import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 from pydantic import ValidationError
 
+from app.agent.tools.base import ToolContext, ToolResult
+from app.agent.tools.cancel_appointment import cancel_appointment_tool
+from app.agent.tools.find_appointments import find_appointments_tool
+from app.agent.tools.reschedule_appointment import reschedule_appointment_tool
+from app.calendar.resolver import no_calendars
+from app.domain.tenant_config import load_tenant_config
 from tests.conversational.fakes import FakeCalendar
 from tests.conversational.harness import (
+    TENANTS_DIR,
     Scenario,
+    build_registry,
     load_scenario,
     run_scenario,
     scenario_paths,
@@ -178,6 +189,112 @@ def test_calendario_falso_resolve_slot_relativo_e_respeita_ocupado() -> None:
     assert "14:30" in livres[0]["starts_at"]
 
 
+def _stub_registry(tools: list[dict[str, Any]]) -> Any:
+    scenario = Scenario.model_validate({"scenario": "meta_stub", "tools": tools, "turns": []})
+    calendar = FakeCalendar(now=scenario.now.astimezone(), timezone="America/Sao_Paulo")
+    return build_registry(scenario, calendar), calendar
+
+
+async def _call(registry: Any, name: str, arguments: dict[str, Any]) -> ToolResult:
+    ctx = ToolContext(
+        tenant_id=uuid.uuid4(),
+        conversation_id=uuid.uuid4(),
+        contact_id=uuid.uuid4(),
+        channel="whatsapp",
+        config=load_tenant_config(TENANTS_DIR / "clinica-exemplo.yaml"),
+        now=datetime(2026, 9, 8, 10, 0, tzinfo=ZoneInfo("America/Sao_Paulo")),
+    )
+    result: ToolResult = await registry.get(name).handler(ctx, arguments)
+    return result
+
+
+async def test_stub_com_varias_respostas_entrega_uma_por_chamada_e_repete_a_ultima() -> None:
+    """O cancelamento em dois turnos: a primeira chamada pergunta, a segunda cancela."""
+    registry, _ = _stub_registry(
+        [
+            {
+                "name": "cancel_appointment",
+                "results": [
+                    {"result": {"status": "confirmation_required"}},
+                    {"result": {"status": "needs_human"}, "error": True},
+                    {"result": {"status": "cancelled"}},
+                ],
+            }
+        ]
+    )
+
+    answers = [await _call(registry, "cancel_appointment", {}) for _ in range(4)]
+
+    assert [a.content["status"] for a in answers] == [
+        "confirmation_required",
+        "needs_human",
+        "cancelled",
+        "cancelled",  # esgotada a lista, a ultima se repete
+    ]
+    assert [a.is_error for a in answers] == [False, True, False, False]
+
+
+async def test_instante_relativo_do_stub_vira_iso_com_offset_em_qualquer_profundidade() -> None:
+    registry, calendar = _stub_registry(
+        [
+            {
+                "name": "find_appointments",
+                "result": {
+                    "appointments": [{"starts_at": "@+1 14:30", "human": "texto"}],
+                    "outro": ["@hoje 12:00", 3],
+                },
+            }
+        ]
+    )
+
+    result = await _call(registry, "find_appointments", {})
+
+    item = result.content["appointments"][0]
+    assert item["starts_at"] == calendar.resolve("+1 14:30").isoformat()
+    assert item["starts_at"].endswith("-03:00")  # offset: sem ele o guardrail ignora o instante
+    assert result.content["outro"] == [calendar.resolve("hoje 12:00").isoformat(), 3]
+    assert item["human"] == "texto"
+
+
+@pytest.mark.parametrize(
+    ("name", "factory", "kind"),
+    [
+        ("find_appointments", find_appointments_tool, "read"),
+        ("reschedule_appointment", lambda: reschedule_appointment_tool(no_calendars), "write"),
+        ("cancel_appointment", lambda: cancel_appointment_tool(no_calendars), "write"),
+    ],
+)
+def test_stub_de_tool_de_producao_mantem_o_contrato_que_o_modelo_ve(
+    name: str, factory: Any, kind: str
+) -> None:
+    """O cenario troca o handler, nao o que o modelo le: descricao, schema e validacao."""
+    registry, _ = _stub_registry([{"name": name, "description": "descricao do cenario"}])
+    production = factory()
+
+    spec = registry.get(name)
+
+    assert spec.description == production.description != "descricao do cenario"
+    assert spec.input_schema == production.input_schema
+    assert spec.args_model is production.args_model
+    assert spec.kind == kind
+
+
+def test_argumento_invalido_para_tool_de_producao_e_recusado_pela_validacao_real() -> None:
+    """Cenario com `appointment_id` que nao e UUID quebra, em vez de passar por um stub frouxo.
+
+    O motor valida os argumentos com `args_model` antes de chamar o handler; como o stub
+    carrega o modelo de producao, o roteiro de um cenario nao consegue chamar a tool com
+    argumento que a tool de verdade recusaria.
+    """
+    registry, _ = _stub_registry([{"name": "cancel_appointment"}])
+    args_model = registry.get("cancel_appointment").args_model
+
+    assert args_model is not None
+    with pytest.raises(ValidationError):
+        args_model.model_validate({"appointment_id": "abc"})
+    args_model.model_validate({"appointment_id": str(uuid.uuid4())})
+
+
 async def test_nenhum_cenario_toca_o_banco(monkeypatch: pytest.MonkeyPatch) -> None:
     """Criterio de aceite da S11: a suite roda offline.
 
@@ -191,6 +308,9 @@ async def test_nenhum_cenario_toca_o_banco(monkeypatch: pytest.MonkeyPatch) -> N
 
     monkeypatch.setattr("app.agent.tools.list_services.tenant_session", _proibido)
     monkeypatch.setattr("app.agent.tools.search_knowledge.search_knowledge", _proibido)
+    monkeypatch.setattr("app.agent.tools.find_appointments.tenant_session", _proibido)
+    monkeypatch.setattr("app.agent.tools.reschedule_appointment.tenant_session", _proibido)
+    monkeypatch.setattr("app.agent.tools.cancel_appointment.tenant_session", _proibido)
 
     for path in scenario_paths():
         await run_scenario(load_scenario(path))

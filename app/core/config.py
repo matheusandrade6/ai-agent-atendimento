@@ -97,6 +97,9 @@ class Settings(BaseSettings):
     # que o profissional ja ocupou no Google. Resposta lenta do cliente? O modelo consulta de
     # novo, e o custo e uma chamada de leitura.
     slot_token_ttl_minutes: int = Field(default=30, ge=1, le=240)
+    # Quanto tempo o cliente tem para confirmar um cancelamento (12.3). Depois disso o
+    # `cancel_appointment` volta a pedir a confirmacao: um "sim" de horas atras nao e "sim".
+    confirmation_token_ttl_minutes: int = Field(default=30, ge=1, le=240)
 
     # --- limites globais (teto sobre o que o tenant configura) ---
     max_tool_iterations: int = 6
